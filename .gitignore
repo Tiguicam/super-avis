@@ -1,6 +1,9 @@
+# secrets et tests locaux
+.streamlit/
 service_account.json
-__pycache__/
-*.pyc
-.env
 client_secret.json
 token.json
+secrets_block.txt
+convert_key.py
+generate_secrets.py
+test_gsheet.py
