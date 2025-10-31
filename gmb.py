@@ -7,9 +7,9 @@ OAuth (popup) la 1ère fois -> token.json réutilisé ensuite
 Dépendances :
   pip install google-auth google-auth-oauthlib gspread pyyaml python-dateutil
 Fichiers requis dans le dossier :
-  - gmb.yaml             
+  - gmb.yaml
   - client_secret.json   (OAuth Desktop)
-  - service_account.json (pour Sheets)
+  - service_account.json (pour Sheets en local si pas de st.secrets)
 """
 
 import os, re, yaml
@@ -25,7 +25,7 @@ from google.auth.transport.requests import Request, AuthorizedSession
 GMB_YAML_FILE        = "gmb.yaml"
 CLIENT_SECRET_FILE   = "client_secret.json"
 TOKEN_FILE           = "token.json"
-SERVICE_ACCOUNT_JSON = "service_account.json"
+SERVICE_ACCOUNT_JSON = "service_account.json"  # compat local
 
 SCOPE_GMB = ["https://www.googleapis.com/auth/business.manage"]
 BASE_URL_V4  = "https://mybusiness.googleapis.com/v4"
@@ -36,6 +36,23 @@ EXPECTED_HEADERS = [
     "formation", "texte", "url", "etablissement", "ville",
     "reponse_1", "reponse_2", "reponse_3", "site"
 ]
+
+# ----------------------------------------------------------------
+# Auth Sheets (Streamlit + fallback local)
+# ----------------------------------------------------------------
+def _get_gspread_client():
+    """
+    - En mode Streamlit : utilise st.secrets["gcp_service_account"]
+    - Sinon : lit un fichier service account local (via $GSPREAD_SA_JSON ou SERVICE_ACCOUNT_JSON)
+    """
+    try:
+        import streamlit as st
+        if "gcp_service_account" in st.secrets:
+            return gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+    except Exception:
+        pass
+    cred_path = os.getenv("GSPREAD_SA_JSON", SERVICE_ACCOUNT_JSON)
+    return gspread.service_account(filename=cred_path)
 
 # ----------------------------------------------------------------
 # Helpers
@@ -88,7 +105,7 @@ def load_gmb_yaml(path: str):
     return (raw.get("gmb") or [])
 
 # ----------------------------------------------------------------
-# AUTH
+# AUTH (GMB OAuth)
 # ----------------------------------------------------------------
 def get_user_credentials() -> Credentials:
     creds = None
@@ -118,7 +135,7 @@ def build_session(creds: Credentials) -> AuthorizedSession:
 # Sheets
 # ----------------------------------------------------------------
 def get_sheet(sheet_id: str, tab_name: str = "TEST"):
-    gc = gspread.service_account(filename=SERVICE_ACCOUNT_JSON)
+    gc = _get_gspread_client()
     sh = gc.open_by_key(sheet_id)
     try:
         ws = sh.worksheet(tab_name)
@@ -143,14 +160,11 @@ def list_reviews_for_location(session, account_id: str, location_id: str, page_s
         params = {"pageSize": page_size}
         if page_token:
             params["pageToken"] = page_token
-
         resp = session.get(f"{BASE_URL_V4}/{name}/reviews", params=params)
         resp.raise_for_status()
         data = resp.json()
-
         for r in data.get("reviews", []):
             yield r
-
         page_token = data.get("nextPageToken")
         if not page_token:
             break
@@ -164,14 +178,11 @@ def get_city_v1(session: AuthorizedSession, location_id: str) -> str:
         )
         if r.status_code != 200:
             return ""
-
         data = r.json() or {}
-
         sfa = data.get("storefrontAddress", {}) or {}
         city = sfa.get("locality") or sfa.get("localityName") or sfa.get("sublocality")
         if city:
             return clean(city)
-
         addr = data.get("address", {}) or {}
         city = addr.get("locality") or addr.get("localityName") or addr.get("sublocality")
         return clean(city)
@@ -184,14 +195,11 @@ def get_city_v4(session: AuthorizedSession, account_id: str, location_id: str) -
         r = session.get(f"{BASE_URL_V4}/accounts/{account_id}/locations/{location_id}", params=params)
         if r.status_code != 200:
             return ""
-
         data = r.json() or {}
         addr = data.get("address", {}) or {}
-
         city = addr.get("locality") or addr.get("localityName") or addr.get("sublocality")
         if city:
             return clean(city)
-
         locname = clean(data.get("locationName", ""))
         m = re.search(r"-\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s]+)$", locname)
         if m:
@@ -204,7 +212,6 @@ def autodetect_city(session, account_id: str, location_id: str) -> str:
     city = get_city_v1(session, location_id)
     if city:
         return city
-
     city = get_city_v4(session, account_id, location_id)
     return city
 
@@ -214,7 +221,7 @@ def map_gmb_review_to_row(review: dict, ecole_name: str, account_id: str, locati
     reply    = review.get("reviewReply", {}) or {}
 
     prenom = clean(reviewer.get("displayName", ""))
-    note   = normalize_star(review.get("starRating", ""))  
+    note   = normalize_star(review.get("starRating", ""))
     texte  = clean(review.get("comment", ""))
 
     date_iso = review.get("createTime", "")
@@ -247,7 +254,6 @@ def map_gmb_review_to_row(review: dict, ecole_name: str, account_id: str, locati
         "reponse_3": "",
         "site": "gmb",
     }
-
     return [row_dict.get(k, "") for k in EXPECTED_HEADERS], row_dict["uid"]
 
 # ----------------------------------------------------------------

@@ -1,6 +1,6 @@
 # update_summary.py
 # Met à jour la feuille SOMMAIRE avec les moyennes par école
-# Compatible TEST + forces toutes les colonnes même si vides
+# Compatible TEST + force toutes les colonnes même si vides
 
 import gspread
 import yaml
@@ -11,7 +11,7 @@ from statistics import mean
 # CONFIG
 # ------------------------------------------------
 YAML_FILES = ["ecole.yaml", "ecoles.yaml"]
-CREDENTIALS_FILE = "service_account.json"
+CREDENTIALS_FILE = "service_account.json"  # compat local / fallback
 
 EXPECTED_SITES = ["diplomeo", "capitainestudy", "custplace", "gmb"]
 
@@ -24,6 +24,22 @@ SUMMARY_HEADER = [
     "Moyenne Générale",
 ]
 
+# ------------------------------------------------
+# Auth Sheets (Streamlit + fallback local)
+# ------------------------------------------------
+def _get_gspread_client():
+    """
+    - En mode Streamlit : utilise st.secrets["gcp_service_account"]
+    - Sinon : lit un fichier service account local (via $GSPREAD_SA_JSON ou CREDENTIALS_FILE)
+    """
+    try:
+        import streamlit as st
+        if "gcp_service_account" in st.secrets:
+            return gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+    except Exception:
+        pass
+    cred_path = os.getenv("GSPREAD_SA_JSON", CREDENTIALS_FILE)
+    return gspread.service_account(filename=cred_path)
 
 # ------------------------------------------------
 # YAML
@@ -34,27 +50,24 @@ def _load_yaml():
         if os.path.exists(fn):
             with open(fn, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f)
-
     raise FileNotFoundError("❌ Aucun fichier YAML trouvé (ecole.yaml / ecoles.yaml)")
-
 
 # ------------------------------------------------
 # Sheets
 # ------------------------------------------------
 def get_sheet(sheet_id, tab="TEST"):
     """Retourne un onglet Google Sheet."""
-    gc = gspread.service_account(filename=CREDENTIALS_FILE)
+    gc = _get_gspread_client()
     return gc.open_by_key(sheet_id).worksheet(tab)
-
 
 def get_or_create_summary(sheet_id):
     """Retourne l’onglet SOMMAIRE ou le crée si absent + force l'entête."""
-    gc = gspread.service_account(filename=CREDENTIALS_FILE)
+    gc = _get_gspread_client()
     doc = gc.open_by_key(sheet_id)
 
     try:
         ws = doc.worksheet("Sommaire")
-    except:
+    except gspread.exceptions.WorksheetNotFound:
         ws = doc.add_worksheet("Sommaire", rows=200, cols=10)
 
     # Vérifie entête
@@ -63,7 +76,6 @@ def get_or_create_summary(sheet_id):
         ws.update("A1:F1", [SUMMARY_HEADER])
 
     return ws
-
 
 # ------------------------------------------------
 # Calculs
@@ -102,7 +114,6 @@ def compute_means(rows):
 
     return res
 
-
 # ------------------------------------------------
 # Mise à jour d’une ligne SOMMAIRE
 # ------------------------------------------------
@@ -119,7 +130,6 @@ def update_row(ws, row, ecole, means):
             means.get("general", ""),
         ]]
     )
-
 
 # ------------------------------------------------
 # Main
@@ -145,7 +155,7 @@ def run(logger=print, school_filter=None):
         # Récupération TEST
         try:
             test_ws = get_sheet(sheet_id, "TEST")
-        except:
+        except Exception:
             logger(f"⚠️ {ecole} → feuille TEST introuvable, ignorée.")
             continue
 
@@ -173,7 +183,6 @@ def run(logger=print, school_filter=None):
         logger(f"✅ SOMMAIRE mis à jour pour {ecole}")
 
     logger("✅ Mise à jour SOMMAIRE — Terminé !")
-
 
 if __name__ == "__main__":
     run()

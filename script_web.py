@@ -20,7 +20,7 @@ from dateutil.relativedelta import relativedelta
 
 # === CONFIG ===
 YAML_FILES = ["ecole.yaml", "ecoles.yaml"]  # on tente ecole.yaml puis ecoles.yaml
-CREDENTIALS_FILE = "service_account.json"
+CREDENTIALS_FILE = "service_account.json"  # gardé pour compat (fallback local)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -32,6 +32,23 @@ EXPECTED_HEADERS = [
     "formation", "texte", "url", "etablissement", "ville",
     "reponse_1", "reponse_2", "reponse_3", "site"
 ]
+
+# --- AUTH GOOGLE SHEETS (Streamlit + fallback local) ---
+def _get_gspread_client():
+    """
+    - En mode Streamlit : utilise st.secrets["gcp_service_account"]
+    - Sinon : lit un fichier service account local (chemin via $GSPREAD_SA_JSON ou 'service_account.json')
+    """
+    try:
+        import streamlit as st  # import local pour éviter la dépendance hors Streamlit
+        if "gcp_service_account" in st.secrets:
+            return gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+    except Exception:
+        # On ignore toute erreur et on retombe sur le mode local
+        pass
+
+    cred_path = os.getenv("GSPREAD_SA_JSON", CREDENTIALS_FILE)
+    return gspread.service_account(filename=cred_path)
 
 # === HELPERS ===
 def clean(t: str) -> str:
@@ -164,9 +181,9 @@ def detect_etab_from_url(url: str) -> str:
     return ""
 
 # === GOOGLE SHEETS ===
-def get_sheet(sheet_id: str):
-    gc = gspread.service_account(filename=CREDENTIALS_FILE)
-    return gc.open_by_key(sheet_id).worksheet("TEST")
+def get_sheet(sheet_id: str, worksheet_name: str = "TEST"):
+    gc = _get_gspread_client()
+    return gc.open_by_key(sheet_id).worksheet(worksheet_name)
 
 def ensure_headers(sheet):
     try:
