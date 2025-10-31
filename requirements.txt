@@ -1,0 +1,8 @@
+streamlit
+gspread
+oauth2client
+pandas
+pyyaml
+requests
+beautifulsoup4
+python-dateutil
