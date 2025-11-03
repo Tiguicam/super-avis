@@ -1,4 +1,4 @@
-# script_web.py
+# === SCRIPT WEB HEADLESS ===
 # Version "headless" pour être lancée depuis le launcher (une seule UI)
 # -> pas de fenêtre Tkinter ici
 # -> expose run(logger=print, school_filter=None, ecoles_choisies=None)
@@ -11,7 +11,6 @@ import random
 import hashlib
 import requests
 import gspread
-
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, urlunparse, parse_qs, urlencode
 from gspread.utils import rowcol_to_a1
@@ -20,7 +19,7 @@ from dateutil.relativedelta import relativedelta
 
 # === CONFIG ===
 YAML_FILES = ["ecole.yaml", "ecoles.yaml"]  # on tente ecole.yaml puis ecoles.yaml
-CREDENTIALS_FILE = "service_account.json"  # gardé pour compat (fallback local)
+CREDENTIALS_FILE = "service_account.json"   # gardé pour compat (fallback local)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -28,9 +27,20 @@ HEADERS = {
 }
 
 EXPECTED_HEADERS = [
-    "uid", "prenom", "note", "date", "annee",
-    "formation", "texte", "url", "etablissement", "ville",
-    "reponse_1", "reponse_2", "reponse_3", "site"
+    "uid",
+    "prenom",
+    "note",
+    "date",
+    "annee",
+    "formation",
+    "texte",
+    "url",
+    "etablissement",
+    "ville",
+    "reponse_1",
+    "reponse_2",
+    "reponse_3",
+    "site",
 ]
 
 # --- AUTH GOOGLE SHEETS (Streamlit + fallback local) ---
@@ -214,43 +224,52 @@ def parse_etablissement_ville_diplomeo(url: str):
 def extract_reviews_diplomeo(soup, url, etab, ville):
     data = []
     for li in soup.select(ITEM_SEL_DIP):
-        prenom  = clean(li.select_one("h3").get_text() if li.select_one("h3") else "")
-        note = clean(li.select_one('[data-cy="review-commun-list-item-rating"]').get_text() if li.select_one('[data-cy="review-commun-list-item-rating"]') else "")
-        date_rel = clean(li.select_one('[data-cy="review-commun-list-item-createdAt"]').get_text() if li.select_one('[data-cy="review-commun-list-item-createdAt"]') else "")
+        prenom = clean(li.select_one("h3").get_text() if li.select_one("h3") else "")
+        note = clean(li.select_one('[data-cy="review-commun-list-item-rating"]').get_text()
+                     if li.select_one('[data-cy="review-commun-list-item-rating"]') else "")
+        date_rel = clean(li.select_one('[data-cy="review-commun-list-item-createdAt"]').get_text()
+                         if li.select_one('[data-cy="review-commun-list-item-createdAt"]') else "")
         txt_long = li.select_one('[data-collapse-target="toCollapse2"]')
         texte = clean(txt_long.get_text()) if txt_long and clean(txt_long.get_text()) else clean(li.get_text(" ", strip=True))
-        formation = clean(li.select_one('[data-collapse-target="toCollapse"] .tw-text-heading-xs').get_text() if li.select_one('[data-collapse-target="toCollapse"] .tw-text-heading-xs') else "")
-
+        formation = clean(li.select_one('[data-collapse-target="toCollapse"] .tw-text-heading-xs').get_text()
+                          if li.select_one('[data-collapse-target="toCollapse"] .tw-text-heading-xs') else "")
         annees = re.findall(r"\b(\d{4})\b", date_rel + " " + texte)
         annee = ", ".join(sorted(set(annees))) if annees else ""
         if not annee:
             calc = parse_relative_date(date_rel)
             if calc:
                 annee = calc
-
         data.append({
-            # UID STABLE (laisse l'URL pour tracer la source exacte)
             "uid": compute_uid("web", url, prenom, texte),
-            "prenom": prenom, "note": note, "date": date_rel, "annee": annee,
-            "formation": formation, "texte": texte,
-            "url": url, "etablissement": normalize_ecole(etab), "ville": ville,
-            "reponse_1": "", "reponse_2": "", "reponse_3": "", "site": "diplomeo"
+            "prenom": prenom,
+            "note": note,
+            "date": date_rel,
+            "annee": annee,
+            "formation": formation,
+            "texte": texte,
+            "url": url,
+            "etablissement": normalize_ecole(etab),
+            "ville": ville,
+            "reponse_1": "",
+            "reponse_2": "",
+            "reponse_3": "",
+            "site": "diplomeo"
         })
     return data
 
 def scrape_diplomeo(url):
     s = requests.Session()
     s.headers.update(HEADERS)
-    r = s.get(url, timeout=20); r.raise_for_status()
+    r = s.get(url, timeout=20)
+    r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-
     pag_node = soup.select_one('[data-pagination-paginate-path-value]')
     if not pag_node:
         return extract_reviews_diplomeo(soup, url, *parse_etablissement_ville_diplomeo(url))
 
     paginate_path = pag_node.get("data-pagination-paginate-path-value")
     page_param = pag_node.get("data-pagination-page-parameter-value") or "page"
-    max_value  = pag_node.get("data-pagination-page-max-value") or 50
+    max_value = pag_node.get("data-pagination-page-max-value") or 50
     try:
         max_value = int(max_value)
     except Exception:
@@ -288,7 +307,6 @@ def extract_reviews_capstudy(soup, url):
         classes = set(bloc.get("class", []))
         is_reply = "reply" in classes or bloc.find_parent("ul", class_="replies")
         texte = clean(" ".join(p.get_text(" ", strip=True) for p in bloc.select("div.comment-body p")))
-
         if is_reply:
             if current_review and texte:
                 for i in range(1, 4):
@@ -301,6 +319,7 @@ def extract_reviews_capstudy(soup, url):
         date_rel = clean(bloc.select_one("span.comment-date").get_text()) if bloc.select_one("span.comment-date") else ""
         annees = re.findall(r"\b(\d{4})\b", date_rel)
         annee = ", ".join(annees) if annees else ""
+
         note_val = 0.0
         for i in bloc.select("div.listing-rating i, div.listing-review-rating i"):
             classes = set(i.get("class", []))
@@ -312,10 +331,19 @@ def extract_reviews_capstudy(soup, url):
 
         current_review = {
             "uid": compute_uid("web", url, prenom, texte),
-            "prenom": prenom, "note": note, "date": date_rel, "annee": annee,
-            "formation": "", "texte": texte,
-            "url": url, "etablissement": normalize_ecole(etab), "ville": ville,
-            "reponse_1": "", "reponse_2": "", "reponse_3": "", "site": "capitainestudy"
+            "prenom": prenom,
+            "note": note,
+            "date": date_rel,
+            "annee": annee,
+            "formation": "",
+            "texte": texte,
+            "url": url,
+            "etablissement": normalize_ecole(etab),
+            "ville": ville,
+            "reponse_1": "",
+            "reponse_2": "",
+            "reponse_3": "",
+            "site": "capitainestudy"
         }
         reviews.append(current_review)
     return reviews
@@ -378,25 +406,38 @@ def extract_reviews_cust(soup, url, etab, ville):
             m = re.search(r"s-(\d+)", " ".join(note_tag.get("class", [])))
             if m:
                 note = m.group(1)
+
         txt_tag = bloc.select_one("p.mb-3")
         if txt_tag:
             texte = clean(txt_tag.get_text(" ", strip=True))
+
         prenom_tag = bloc.select_one("span.opacity-60")
         if prenom_tag:
             prenom = clean(prenom_tag.get_text()).replace("Par ", "")
+
         date_tag = bloc.find("span", string=lambda x: x and "expérience" in x.lower())
         if date_tag:
             date_rel = clean(date_tag.get_text())
             m = re.search(r"(\d{4})", date_rel)
             if m:
                 annee = m.group(1)
+
         if prenom or texte:
             reviews.append({
                 "uid": compute_uid("web", url, prenom, texte),
-                "prenom": prenom, "note": note if note else "pas de note",
-                "date": date_rel, "annee": annee, "formation": "",
-                "texte": texte, "url": url, "etablissement": normalize_ecole(etab), "ville": ville,
-                "reponse_1": "", "reponse_2": "", "reponse_3": "", "site": "custplace"
+                "prenom": prenom,
+                "note": note if note else "pas de note",
+                "date": date_rel,
+                "annee": annee,
+                "formation": "",
+                "texte": texte,
+                "url": url,
+                "etablissement": normalize_ecole(etab),
+                "ville": ville,
+                "reponse_1": "",
+                "reponse_2": "",
+                "reponse_3": "",
+                "site": "custplace"
             })
     return reviews
 
@@ -426,9 +467,12 @@ def scrape_cust(url):
     return all_reviews
 
 # === CHARGEMENT YAML ===
-from utils import load_yaml_safe   # <= ajuste si pas le bon module
 def _load_yaml():
-    return load_yaml_safe("ecole.yaml")
+    for fn in YAML_FILES:
+        if os.path.exists(fn):
+            with open(fn, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
+    raise FileNotFoundError("Aucun fichier YAML trouvé (ecole.yaml / ecoles.yaml).")
 
 # === Sélection des écoles (filtre) ===
 def _select_ecoles(ECOLES: dict, school_filter=None, ecoles_choisies=None):
@@ -445,8 +489,7 @@ def _select_ecoles(ECOLES: dict, school_filter=None, ecoles_choisies=None):
 
     # Nouveau : filtre unique depuis le launcher
     if school_filter and school_filter.upper() != "TOUTES":
-        target = school_filter.strip().lower()
-        # match case-insensitive sur la clé
+        target = school_filter.strip().lower()  # match case-insensitive sur la clé
         selected = [k for k in keys if k.strip().lower() == target]
         return selected
 
@@ -454,9 +497,8 @@ def _select_ecoles(ECOLES: dict, school_filter=None, ecoles_choisies=None):
     return keys
 
 # === MAIN (pour launcher) ===
-def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
-    cfg = config
-
+def run(logger=print, school_filter=None, ecoles_choisies=None):
+    cfg = _load_yaml()
     ECOLES = cfg["ecoles"]
 
     selected_keys = _select_ecoles(ECOLES, school_filter=school_filter, ecoles_choisies=ecoles_choisies)
@@ -464,13 +506,12 @@ def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
         logger(f"⚠️ Aucune école sélectionnée pour le filtre: {school_filter!r}")
         return
 
-    logger(f"🎯 Filtre école: {school_filter or 'TOUTES'}  |  Écoles traitées: {', '.join(selected_keys)}")
+    logger(f"🎯 Filtre école: {school_filter or 'TOUTES'} | Écoles traitées: {', '.join(selected_keys)}")
 
     for ecole in selected_keys:
         block = ECOLES[ecole] or {}
         sheet_id = block.get("sheet_id", "").strip()
         urls = block.get("urls", []) or []
-
         if not sheet_id or not urls:
             logger(f"⚠️ Bloc ignoré ({ecole}) — sheet_id ou urls manquants.")
             continue
@@ -483,16 +524,14 @@ def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
         header = sheet.row_values(1)
         col_index = {name: header.index(name) + 1 for name in EXPECTED_HEADERS}  # 1-based
 
-        existing_uid = set()      # uids exacts (incluant l'URL)
-        existing_soft = {}        # soft_key(site, prenom, texte) -> info(row, date, annee)
-
+        existing_uid = set()   # uids exacts (incluant l'URL)
+        existing_soft = {}     # soft_key(site, prenom, texte) -> info(row, date, annee)
         try:
             rows = sheet.get_all_records()
             for i, row in enumerate(rows, start=2):  # data commence à la ligne 2
                 uid_val = str(row.get("uid", "")).strip()
                 if uid_val:
                     existing_uid.add(uid_val)
-
                 sk = soft_key_from_values(row.get("site", ""), row.get("prenom", ""), row.get("texte", ""))
                 if sk:
                     existing_soft[sk] = {
@@ -514,7 +553,6 @@ def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
         run_soft_seen = set()
 
         for i, url in enumerate(urls, start=1):
-
             # 1) Scrape l'URL
             reviews = []
             try:
@@ -557,7 +595,7 @@ def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
                 # existe via soft key ?
                 if sk in existing_soft:
                     info = existing_soft[sk]
-                    new_date  = r.get("date", "") or ""
+                    new_date = r.get("date", "") or ""
                     new_annee = r.get("annee", "") or ""
 
                     if new_date != info["date"] or new_annee != info["annee"]:
@@ -573,10 +611,9 @@ def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
                             })
                             updated_here += 1
 
-                        # update cache
-                        existing_soft[sk]["date"] = new_date
-                        existing_soft[sk]["annee"] = new_annee
-
+                            # update cache
+                            existing_soft[sk]["date"] = new_date
+                            existing_soft[sk]["annee"] = new_annee
                     continue
 
                 # nouveau
@@ -594,8 +631,7 @@ def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
             total_updated += updated_here
 
             # 4) Log
-            logger(f"🌍 {url} → {found} avis  |  +{new_here} nouveaux, ♻️ {updated_here} MAJ")
-
+            logger(f"🌍 {url} → {found} avis | +{new_here} nouveaux, ♻️ {updated_here} MAJ")
             # ✅ PROGRESS : à la fin
             logger(f"PROGRESS {i}/{len(urls)}")
 
@@ -606,7 +642,6 @@ def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
             sheet.append_rows(pending_new_rows, value_input_option="RAW")
 
         # 6) Résumé par école
-
         # ➜ Uniques DANS CE RUN (cross-plateformes)
         uniques_in_run = len(run_soft_seen)
 
