@@ -353,7 +353,7 @@ def main(school_filter=None, logger=print):
 
     for entry in gmb_entries:
         name = (entry.get("name", "") or "").strip()
-        if use_filter and name.lower() != filt:
+        if use_filter and normalize_ecole(name) != normalize_ecole(filt):
             continue
 
         sheet_id = entry.get("sheet_id", "")

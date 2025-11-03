@@ -209,20 +209,14 @@ def _maybe_emit_final(school: str):
 
 # ------------------------------ LOG APPEND (ATOMIQUE) ------------------------------
 def append_log(msg: str):
-    """
-    Append atomique + dédup via clé stable.
-    On évite aussi deux messages strictement identiques d'affilée.
-    On capture les morceaux de la ligne finale si on les voit passer.
-    """
     raw = str(msg)
     norm = _normalize_msg(raw)
     key = _dedup_key(raw)
 
-    # filet de sécurité: même message que le précédent -> skip
+    # filet de sécurité
     if st.session_state.last_norm_msg == norm:
         return
 
-    # Capture des morceaux avant l'ajout dans la liste (pour pouvoir réémettre via append_log)
     _capture_parts(norm)
 
     lock = _get_log_lock()
@@ -234,9 +228,15 @@ def append_log(msg: str):
         st.session_state.last_norm_msg = norm
         st.session_state.last_key = key
 
-    # rafraîchit l'UI
+    # ✅ PROGRESS BAR UPDATE
+    if "progress_bar" in st.session_state and st.session_state.progress_bar:
+        current = len(st.session_state.logs)
+        pct = min(100, int(current / 5))   # 5 logs = +20%
+        st.session_state.progress_bar.progress(pct)
+
     render_logs()
     time.sleep(0.003)
+
 
 # ------------------------------ RUNNER ------------------------------
 def _start_run(task: str, school: str):
@@ -273,6 +273,7 @@ def _start_run(task: str, school: str):
         st.session_state.final_emitted = set()
 
         append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
+        st.session_state.progress_bar = st.progress(0)
         append_log("⏳ En cours…")
 
         def logger(m):
@@ -297,6 +298,9 @@ def _start_run(task: str, school: str):
             if not parts or "uniques" not in parts:
                 append_log(f"⚠️ Pas de ligne 'uniques' reçue pour {school}. Ajoute dans script_web : "
                            f"📊 {school} → uniques <N>  (ou)  📊 {school} → écrit sheet <N>")
+
+            if "progress_bar" in st.session_state and st.session_state.progress_bar:
+                st.session_state.progress_bar.progress(100)
 
             append_log("✅ Terminé")
         except Exception as e:
@@ -333,7 +337,7 @@ with col3:
 with col4:
     if st.button("🧹 Effacer les logs", key="btn_clear", disabled=st.session_state.busy):
         st.session_state.logs.clear()
-        render_logs()
+  
 
 # ------------------------------ EXPORT ------------------------------
 if st.session_state.logs:
