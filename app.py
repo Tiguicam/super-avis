@@ -2,26 +2,15 @@ import streamlit as st
 import re
 import time
 import uuid
-import sys
-import yaml
 from datetime import datetime
 from threading import Lock
-from pathlib import Path
-
 
 import script_web
 import gmb
 import update_summary
 
-st.set_page_config(page_title="Super Avis", layout="wide")
-st.warning("DEBUG DEPLOY")
-st.write("python:", sys.version)
-st.write("platform:", sys.platform)
-st.write("cwd:", Path.cwd())
-st.write("__file__ parent:", Path(__file__).resolve().parent)
-st.write("Fichiers YAML vus:", [str(p) for p in Path.cwd().glob("**/*.y*ml")])
 # ------------------------------ INIT ------------------------------
-
+st.set_page_config(page_title="Super Avis", layout="wide")
 st.markdown("## 🧾 Super Avis – Interface Web")
 
 def _now_hms():
@@ -47,9 +36,9 @@ RE_TOTAL_BRUT = re.compile(
 )
 
 # 2) Uniques: l'une de ces variantes
-#    - "📊 CREAD → uniques 17"
-#    - "📊 CREAD → total avis uniques 17"
-#    - "📊 CREAD → écrit sheet 17"
+# - "📊 CREAD → uniques 17"
+# - "📊 CREAD → total avis uniques 17"
+# - "📊 CREAD → écrit sheet 17"
 RE_UNIQUES = re.compile(
     r"^📊\s*(?P<school>.+?)\s*→\s*(?:uniques|total\s*avis\s*uniques|(?:écrit|ecrit)\s*sheet)\s*(?P<uniques>\d+)\s*$",
     re.IGNORECASE
@@ -103,17 +92,6 @@ st.session_state.selected_school = st.selectbox(
     index=ECOLES.index(st.session_state.selected_school),
 )
 
-def load_yaml_safe(filename: str):
-    base = Path(__file__).resolve().parent
-    for p in [base/filename, base/"config"/filename, base.parent/filename, Path.cwd()/filename]:
-        if p.exists():
-            return yaml.safe_load(p.read_text(encoding="utf-8"))
-    raise FileNotFoundError(f"YAML introuvable: {filename}")
-ecoles_cfg = load_yaml_safe("ecole.yaml")
-gmb_cfg = load_yaml_safe("gmb.yaml")
-# cfg = load_yaml_safe("config.yaml")
-
-
 # ------------------------------ LOGS UI ------------------------------
 logs_box = st.container()
 
@@ -121,7 +99,7 @@ def render_logs():
     if not st.session_state.logs:
         logs_box.info("Aucun log pour le moment.")
         return
-    txt = "\n".join(f"- `{r['ts']}` {r['msg']}" for r in st.session_state.logs)
+    txt = "\n".join(f"- {r['ts']} {r['msg']}" for r in st.session_state.logs)
     logs_box.markdown(txt)
 
 render_logs()
@@ -154,7 +132,7 @@ def _dedup_key(raw_msg: str) -> str:
         return f"sys::collect::{school.lower()}"
     if txt.startswith("📊 "):
         return "sys::summary::" + txt.lower()
-    
+
     # URL prioritaire
     m = URL_RE.search(s)
     if m:
@@ -174,8 +152,7 @@ def _dedup_key(raw_msg: str) -> str:
 def _should_skip_by_key(key: str) -> bool:
     if not key:
         return True
-    if st.session_state.run_id is None:
-        # pas de run actif -> on n'affiche rien
+    if st.session_state.run_id is None:  # pas de run actif -> on n'affiche rien
         return True
     return key in st.session_state.seen_keys
 
@@ -237,6 +214,7 @@ def append_log(msg: str):
     # filet de sécurité
     if st.session_state.last_norm_msg == norm:
         return
+
     # ✅ Detect progress events: "PROGRESS i/n"
     if norm.startswith("PROGRESS "):
         try:
@@ -249,10 +227,7 @@ def append_log(msg: str):
                 st.session_state.progress_bar.progress(pct)
         except:
             pass
-        return
-
-
-    _capture_parts(norm)
+        return _capture_parts(norm)
 
     lock = _get_log_lock()
     with lock:
@@ -262,10 +237,8 @@ def append_log(msg: str):
         st.session_state.logs.append({"ts": _now_hms(), "msg": norm})
         st.session_state.last_norm_msg = norm
         st.session_state.last_key = key
-
     render_logs()
     time.sleep(0.003)
-
 
 # ------------------------------ RUNNER ------------------------------
 def _start_run(task: str, school: str):
@@ -284,7 +257,6 @@ def _start_run(task: str, school: str):
     # Alloue un token unique pour ce run
     token = str(uuid.uuid4())
     st.session_state.active_run_token = token
-
     try:
         now = time.time()
         if now - st.session_state.last_start_epoch < 0.25:
@@ -293,6 +265,7 @@ def _start_run(task: str, school: str):
 
         st.session_state.busy = True
         st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
+
         # reset par run
         st.session_state.seen_keys = set()
         st.session_state.logs = []
@@ -313,25 +286,27 @@ def _start_run(task: str, school: str):
 
         try:
             if task == "web":
-                script_web.run(logger=logger, school_filter=school, config=ecoles_cfg)
+                script_web.run(logger=logger, school_filter=school)
             elif task == "gmb":
-                gmb.run(logger=logger, school_filter=school, config=gmb_cfg)
+                gmb.run(logger=logger, school_filter=school)
             elif task == "summary":
                 update_summary.run(logger=logger, school_filter=school)
 
             # Si on n'a pas reçu les "uniques", informe clairement
             school_key = school.strip()
-            parts = st.session_state.final_parts.get(school_key) or \
-                    (st.session_state.final_parts.get(school_key.upper())) or \
-                    (st.session_state.final_parts.get(school_key.lower()))
+            parts = (st.session_state.final_parts.get(school_key)
+                     or st.session_state.final_parts.get(school_key.upper())
+                     or st.session_state.final_parts.get(school_key.lower()))
             if not parts or "uniques" not in parts:
-                append_log(f"⚠️ Pas de ligne 'uniques' reçue pour {school}. Ajoute dans script_web : "
-                           f"📊 {school} → uniques <N>  (ou)  📊 {school} → écrit sheet <N>")
+                append_log(
+                    f"⚠️ Pas de ligne 'uniques' reçue pour {school}. Ajoute dans script_web : "
+                    f"📊 {school} → uniques <N> (ou) 📊 {school} → écrit sheet <N>"
+                )
 
             if "progress_bar" in st.session_state and st.session_state.progress_bar:
                 st.session_state.progress_bar.progress(100)
-
             append_log("✅ Terminé")
+
         except Exception as e:
             append_log(f"❌ ERREUR : {e}")
         finally:
@@ -340,6 +315,7 @@ def _start_run(task: str, school: str):
             # Libère le token si c'est bien notre run
             if st.session_state.active_run_token == token:
                 st.session_state.active_run_token = None
+
     finally:
         try:
             run_lock.release()
@@ -356,7 +332,8 @@ def _on_click_gmb():
 def _on_click_summary():
     _start_run("summary", st.session_state.selected_school)
 
-running = st.session_state.active_run_token is not None
+# état courant pour désactiver les boutons pendant un run
+running = st.session_state.busy
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -368,7 +345,6 @@ with col3:
 with col4:
     if st.button("🧹 Effacer les logs", key="btn_clear"):
         st.session_state.logs.clear()
-  
 
 # ------------------------------ EXPORT ------------------------------
 if st.session_state.logs:
