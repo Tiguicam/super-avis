@@ -1,4 +1,5 @@
 import streamlit as st
+import re
 import time
 from datetime import datetime
 
@@ -14,12 +15,18 @@ def _now_hms():
     return datetime.now().strftime("%H:%M:%S")
 
 def _normalize_msg(s: str) -> str:
-    # dédup agressive: trim, collapse espaces, retire zero-width & CR
-    s = (s or "").replace("\r", "").strip()
-    parts = s.split()
-    return " ".join(parts)
+    if not s:
+        return ""
+    s = s.replace("\r", "")
+    # supprime caractères invisibles courants
+    s = s.replace("\u200b", "").replace("\u200c", "").replace("\ufeff", "")
+    # normalise espaces
+    s = " ".join(s.strip().split())
+    return s
 
-# State
+URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
+
+# State de base
 if "busy" not in st.session_state:
     st.session_state.busy = False
 if "logs" not in st.session_state:
@@ -27,15 +34,15 @@ if "logs" not in st.session_state:
 if "selected_school" not in st.session_state:
     st.session_state.selected_school = "TOUTES"
 
-# run-local states
+# State par RUN
 if "run_id" not in st.session_state:
     st.session_state.run_id = None
-if "seen_in_run" not in st.session_state:
-    st.session_state.seen_in_run = set()  # set[(run_id, norm_msg)]
-if "header_done_for" not in st.session_state:
-    st.session_state.header_done_for = set()  # set[run_id]
+if "seen_msgs" not in st.session_state:
+    st.session_state.seen_msgs = set()    # messages normalisés vus dans ce run
+if "seen_urls" not in st.session_state:
+    st.session_state.seen_urls = set()    # URLs vues dans ce run
 if "last_start_epoch" not in st.session_state:
-    st.session_state.last_start_epoch = 0.0   # anti double-clic / rerun
+    st.session_state.last_start_epoch = 0.0
 
 # ------------------------------ ECOLES ------------------------------
 ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
@@ -56,47 +63,72 @@ def render_logs():
     txt = "\n".join(f"- `{r['ts']}` {r['msg']}" for r in st.session_state.logs)
     logs_box.markdown(txt)
 
-def append_log(msg: str):
-    """Ajoute une ligne si et seulement si (run_id, msg_normalisé) n'a pas déjà été vu."""
-    if st.session_state.run_id is None:
-        return
-    norm = _normalize_msg(msg)
-    if not norm:
-        return
-    key = (st.session_state.run_id, norm)
-    if key in st.session_state.seen_in_run:
-        return
-    st.session_state.seen_in_run.add(key)
-    st.session_state.logs.append({"ts": _now_hms(), "msg": norm})
-    render_logs()
-    # mini yield pour laisser le temps d'afficher
-    time.sleep(0.005)
-
 render_logs()
+
+def _should_skip(msg_norm: str) -> bool:
+    """
+    Règles de déduplication:
+    - Si message normalisé déjà vu dans CE run -> skip
+    - Si on détecte une URL et que l'URL a déjà été vue dans CE run -> skip
+    """
+    if not msg_norm:
+        return True
+    if st.session_state.run_id is None:
+        # si pas de run, on n'affiche rien
+        return True
+
+    # 1) message exact déjà vu ?
+    if msg_norm in st.session_state.seen_msgs:
+        return True
+
+    # 2) URL déjà vue ?
+    m = URL_RE.search(msg_norm)
+    if m:
+        url = m.group(1)
+        # nettoie ponctuation fréquente à droite
+        url = url.rstrip(")];,.!?’’\"")
+        if url in st.session_state.seen_urls:
+            return True
+
+    return False
+
+def _remember_seen(msg_norm: str):
+    st.session_state.seen_msgs.add(msg_norm)
+    m = URL_RE.search(msg_norm)
+    if m:
+        url = m.group(1).rstrip(")];,.!?’’\"")
+        st.session_state.seen_urls.add(url)
+
+def append_log(msg: str):
+    msg_norm = _normalize_msg(msg)
+    if _should_skip(msg_norm):
+        return
+    st.session_state.logs.append({"ts": _now_hms(), "msg": msg_norm})
+    _remember_seen(msg_norm)
+    render_logs()
+    # petite respiration pour laisser l'UI peindre
+    time.sleep(0.003)
 
 # ------------------------------ RUNNER ------------------------------
 def _start_run(task: str, school: str):
-    # anti double-clic/rerun très rapproché (<300ms)
+    # anti double-clic / rerun
     now = time.time()
-    if now - st.session_state.last_start_epoch < 0.3:
+    if now - st.session_state.last_start_epoch < 0.25:
         return
     st.session_state.last_start_epoch = now
-
     if st.session_state.busy:
         return
 
     st.session_state.busy = True
     st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
-    st.session_state.seen_in_run = set()  # reset dédup pour CE run
+    st.session_state.seen_msgs = set()
+    st.session_state.seen_urls = set()
 
-    # entête 1x
-    if st.session_state.run_id not in st.session_state.header_done_for:
-        append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
-        st.session_state.header_done_for.add(st.session_state.run_id)
-
+    append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
     append_log("⏳ En cours…")
 
     def logger(m):
+        # tous les scripts passent ici
         append_log(str(m))
 
     try:
@@ -113,21 +145,17 @@ def _start_run(task: str, school: str):
         st.session_state.busy = False
         st.session_state.run_id = None
 
-# ------------------------------ BOUTONS (sans on_click) ------------------------------
+# ------------------------------ BOUTONS ------------------------------
 col1, col2, col3, col4 = st.columns(4)
-
 with col1:
     if st.button("Scraper plateformes web", disabled=st.session_state.busy):
         _start_run("web", st.session_state.selected_school)
-
 with col2:
     if st.button("Avis Google Business", disabled=st.session_state.busy):
         _start_run("gmb", st.session_state.selected_school)
-
 with col3:
     if st.button("Mettre à jour le Sommaire", disabled=st.session_state.busy):
         _start_run("summary", st.session_state.selected_school)
-
 with col4:
     if st.button("🧹 Effacer les logs", disabled=st.session_state.busy):
         st.session_state.logs.clear()
