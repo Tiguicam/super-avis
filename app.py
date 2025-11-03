@@ -16,11 +16,14 @@ st.markdown("## 🧾 Super Avis – Interface Web")
 defaults = {
     "busy": False,
     "worker": None,
-    "log_queue": None,   # sera une queue.Queue quand un job démarre
+    "log_queue": None,   # queue.Queue quand un job démarre
     "logs": [],
     "task": None,        # "web" | "gmb" | "summary"
     "selected_school": "TOUTES",
     "_last_refresh": 0.0,
+    # Progress
+    "progress_total": 0,
+    "progress_done": 0,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -31,9 +34,11 @@ st.session_state.selected_school = st.selectbox(
     "Sélectionne une école :", ECOLES, index=ECOLES.index(st.session_state.selected_school)
 )
 
-# ------------------------------ Logs helpers ------------------------------
+# ------------------------------ Zones dynamiques ------------------------------
+progress_ph = st.empty()
 log_area = st.empty()
 
+# ------------------------------ Logs helpers ------------------------------
 def _append_log(msg: str):
     st.session_state.logs.append({
         "ts": datetime.now().strftime("%H:%M:%S"),
@@ -47,21 +52,41 @@ def _render_logs():
     txt = "\n".join(f"- `{r['ts']}` {r['msg']}" for r in st.session_state.logs)
     log_area.markdown(txt)
 
+def _update_progress():
+    """Dessine/MAJ la barre de progression pour 'web'."""
+    if st.session_state.task != "web" or st.session_state.progress_total <= 0:
+        progress_ph.empty()
+        return
+    done = st.session_state.progress_done
+    total = st.session_state.progress_total
+    pct = int((done / total) * 100) if total else 0
+    progress_ph.progress(pct, text=f"{pct}% — {done}/{total} URLs traitées")
+
 def _drain_queue(q: "queue.Queue[str] | None") -> bool:
-    """Vide la queue vers les logs. Retourne True si le worker a signalé la fin (__DONE__)."""
+    """
+    Vide la queue vers les logs.
+    Détecte les lignes '🌍 <url> → ...' pour incrémenter la progression.
+    Retourne True si le worker a signalé la fin (__DONE__).
+    """
     if not q:
         return False
-    done = False
+    done_flag = False
     try:
         while True:
             msg = q.get_nowait()
             if msg == "__DONE__":
-                done = True
+                done_flag = True
                 break
+
+            # Progression par URL (uniquement pour 'web')
+            if st.session_state.task == "web" and msg.strip().startswith("🌍 "):
+                st.session_state.progress_done += 1
+                _update_progress()
+
             _append_log(msg)
     except queue.Empty:
         pass
-    return done
+    return done_flag
 
 # ------------------------------ Worker thread ------------------------------
 def _worker(task: str, school: str, q: "queue.Queue[str]"):
@@ -83,13 +108,41 @@ def _worker(task: str, school: str, q: "queue.Queue[str]"):
         q.put("__DONE__")
 
 # ------------------------------ Lancement / UI ------------------------------
+def _compute_total_urls_for_web(school: str) -> int:
+    """
+    Lit le YAML via le module de scraping pour compter le nombre d'URLs
+    qui seront traitées pour l'école sélectionnée.
+    """
+    try:
+        cfg = script_web._load_yaml()  # utilise ton helper existant
+        ECOLES = cfg["ecoles"]
+        keys = script_web._select_ecoles(ECOLES, school_filter=school, ecoles_choisies=None)
+        total = 0
+        for k in keys:
+            block = ECOLES.get(k) or {}
+            urls = block.get("urls", []) or []
+            total += len(urls)
+        return total
+    except Exception:
+        return 0
+
 def _start_task(task_name: str):
     if st.session_state.busy:
         return
-    # reset
+
+    # reset logs & progress
     st.session_state.logs = []
     st.session_state.task = task_name
     st.session_state.busy = True
+    st.session_state.progress_done = 0
+    st.session_state.progress_total = 0
+
+    # Si web → on calcule le total d’URLs pour afficher un %
+    if task_name == "web":
+        st.session_state.progress_total = _compute_total_urls_for_web(st.session_state.selected_school)
+        _update_progress()
+    else:
+        progress_ph.empty()
 
     q: "queue.Queue[str]" = queue.Queue()
     st.session_state.log_queue = q
@@ -123,24 +176,29 @@ with col4:
 # bouton de téléchargement
 if st.session_state.logs:
     export_txt = "\n".join(f"[{r['ts']}] {r['msg']}" for r in st.session_state.logs)
-    st.download_button("⬇️ Télécharger les logs", data=export_txt,
+    st.download_button("⬇️ Télécharger les logs",
+                       data=export_txt,
                        file_name="logs.txt",
                        disabled=st.session_state.busy)
 
 # ------------------------------ Streaming & rendu ------------------------------
-# 1) récupérer ce que le worker a envoyé depuis la dernière frame
 finished = _drain_queue(st.session_state.log_queue)
 
-# 2) si fini, libérer l'UI
 if finished:
+    # Si web : forcer la barre à 100%
+    if st.session_state.task == "web" and st.session_state.progress_total > 0:
+        st.session_state.progress_done = st.session_state.progress_total
+        _update_progress()
+
     st.session_state.busy = False
     st.session_state.worker = None
     st.session_state.log_queue = None
 
-# 3) afficher
+# Affichage
+_update_progress()
 _render_logs()
 
-# 4) rafraîchir gentiment tant qu’un job tourne (≈ toutes les 500 ms)
+# Refresh doux tant que ça tourne (≈ toutes les 500 ms)
 if st.session_state.busy:
     now = time.time()
     if now - st.session_state._last_refresh > 0.5:
