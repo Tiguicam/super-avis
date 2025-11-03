@@ -20,19 +20,37 @@ defaults = {
     "logs": [],
     "task": None,        # "web" | "gmb" | "summary"
     "selected_school": "TOUTES",
+    "prev_school": "TOUTES",
     "_last_refresh": 0.0,
     # Progress
     "progress_total": 0,
     "progress_done": 0,
+    # Prefs
+    "clear_on_school_change": True,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
-st.session_state.selected_school = st.selectbox(
-    "Sélectionne une école :", ECOLES, index=ECOLES.index(st.session_state.selected_school)
-)
+
+top_col1, top_col2 = st.columns([3,1])
+with top_col1:
+    st.session_state.selected_school = st.selectbox(
+        "Sélectionne une école :", ECOLES,
+        index=ECOLES.index(st.session_state.selected_school),
+    )
+with top_col2:
+    st.session_state.clear_on_school_change = st.checkbox(
+        "Effacer les logs\nquand je change d’école",
+        value=st.session_state.clear_on_school_change
+    )
+
+# Effacer les logs si on change d’école (pour éviter l’effet “batch” au rerun)
+if st.session_state.selected_school != st.session_state.prev_school:
+    if st.session_state.clear_on_school_change and not st.session_state.busy:
+        st.session_state.logs = []
+    st.session_state.prev_school = st.session_state.selected_school
 
 # ------------------------------ Zones dynamiques ------------------------------
 progress_ph = st.empty()
@@ -65,7 +83,7 @@ def _update_progress():
 def _drain_queue(q: "queue.Queue[str] | None") -> bool:
     """
     Vide la queue vers les logs.
-    Détecte les lignes '🌍 <url> → ...' pour incrémenter la progression.
+    Incrémente la progression si une ligne commence par http(s)://.
     Retourne True si le worker a signalé la fin (__DONE__).
     """
     if not q:
@@ -78,10 +96,12 @@ def _drain_queue(q: "queue.Queue[str] | None") -> bool:
                 done_flag = True
                 break
 
-            # Progression par URL (uniquement pour 'web')
-            if st.session_state.task == "web" and msg.strip().startswith("🌍 "):
-                st.session_state.progress_done += 1
-                _update_progress()
+            # Progression par URL (web uniquement) si la ligne est une URL
+            if st.session_state.task == "web":
+                s = msg.strip().lower()
+                if s.startswith("http://") or s.startswith("https://"):
+                    st.session_state.progress_done += 1
+                    _update_progress()
 
             _append_log(msg)
     except queue.Empty:
@@ -114,7 +134,7 @@ def _compute_total_urls_for_web(school: str) -> int:
     qui seront traitées pour l'école sélectionnée.
     """
     try:
-        cfg = script_web._load_yaml()  # utilise ton helper existant
+        cfg = script_web._load_yaml()  # helper existant
         ECOLES = cfg["ecoles"]
         keys = script_web._select_ecoles(ECOLES, school_filter=school, ecoles_choisies=None)
         total = 0
@@ -198,9 +218,9 @@ if finished:
 _update_progress()
 _render_logs()
 
-# Refresh doux tant que ça tourne (≈ toutes les 500 ms)
+# Refresh doux tant que ça tourne (~ toutes les 250 ms)
 if st.session_state.busy:
     now = time.time()
-    if now - st.session_state._last_refresh > 0.5:
+    if now - st.session_state._last_refresh > 0.25:
         st.session_state._last_refresh = now
         st.rerun()
