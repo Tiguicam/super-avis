@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 import time
+import uuid
 from datetime import datetime
 from threading import Lock
 
@@ -28,13 +29,13 @@ URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
 TRAIL_PUNCT = ")]>;,.!?’’\"—–-→…:»«·"  # ponctuation finale élargie
 
 # 📊 Formats parsés
-# 1) Ton ancien total (brut) : "📊 CREAD → total 24 avis | +0 nouveaux, ♻️ 7 MAJ"
+# 1) Total brut: "📊 CREAD → total 24 avis | +0 nouveaux, ♻️ 7 MAJ"
 RE_TOTAL_BRUT = re.compile(
     r"^📊\s*(?P<school>.+?)\s*→\s*total\s*(?P<brut>\d+)\s*avis\s*\|\s*\+(?P<new>\d+)\s*nouveaux,?\s*♻️\s*(?P<maj>\d+)\s*MAJ\s*$",
     re.IGNORECASE
 )
 
-# 2) Une ligne uniques que ton script doit ajouter (une des variantes ci-dessous)
+# 2) Uniques: l'une de ces variantes
 #    - "📊 CREAD → uniques 17"
 #    - "📊 CREAD → total avis uniques 17"
 #    - "📊 CREAD → écrit sheet 17"
@@ -72,6 +73,10 @@ if "last_norm_msg" not in st.session_state:
     st.session_state.last_norm_msg = None
 if "last_key" not in st.session_state:
     st.session_state.last_key = None
+
+# Un seul run à la fois (token unique)
+if "active_run_token" not in st.session_state:
+    st.session_state.active_run_token = None
 
 # Stockage des infos parsées pour synthèse finale
 if "final_parts" not in st.session_state:
@@ -197,7 +202,6 @@ def _maybe_emit_final(school: str):
     needed = all(k in d for k in ("brut", "uniques", "new", "maj"))
     if not needed:
         return
-    # émettre la ligne finale
     append_log(f"📊 {school} → brut {d['brut']} | écrit sheet {d['uniques']} | +{d['new']} nouveaux | maj +{d['maj']}")
     st.session_state.final_emitted.add(school)
 
@@ -236,14 +240,19 @@ def append_log(msg: str):
 def _start_run(task: str, school: str):
     """
     Lance un run si et seulement si aucun run n'est déjà actif.
-    Protégé par un verrou global + garde busy (anti-multi-run).
+    Protégé par un verrou global + garde busy + token de run.
     """
-    if st.session_state.busy:
+    # Garde immédiate
+    if st.session_state.busy or st.session_state.active_run_token is not None:
         return
 
     run_lock = _get_run_lock()
     if not run_lock.acquire(blocking=False):
         return
+
+    # Alloue un token unique pour ce run
+    token = str(uuid.uuid4())
+    st.session_state.active_run_token = token
 
     try:
         now = time.time()
@@ -265,6 +274,9 @@ def _start_run(task: str, school: str):
         append_log("⏳ En cours…")
 
         def logger(m):
+            # Ignore tout log qui arriverait d'un "run zombie"
+            if st.session_state.active_run_token != token:
+                return
             append_log(str(m))
 
         try:
@@ -275,19 +287,31 @@ def _start_run(task: str, school: str):
             elif task == "summary":
                 update_summary.run(logger=logger, school_filter=school)
 
+            # Si on n'a pas reçu les "uniques", informe clairement
+            school_key = school.strip()
+            parts = st.session_state.final_parts.get(school_key) or \
+                    (st.session_state.final_parts.get(school_key.upper())) or \
+                    (st.session_state.final_parts.get(school_key.lower()))
+            if not parts or "uniques" not in parts:
+                append_log(f"⚠️ Pas de ligne 'uniques' reçue pour {school}. Ajoute dans script_web : "
+                           f"📊 {school} → uniques <N>  (ou)  📊 {school} → écrit sheet <N>")
+
             append_log("✅ Terminé")
         except Exception as e:
             append_log(f"❌ ERREUR : {e}")
         finally:
             st.session_state.busy = False
             st.session_state.run_id = None
+            # Libère le token si c'est bien notre run
+            if st.session_state.active_run_token == token:
+                st.session_state.active_run_token = None
     finally:
         try:
             run_lock.release()
         except RuntimeError:
             pass
 
-# ------------------------------ BOUTONS (on_click uniquement) ------------------------------
+# ------------------------------ BOUTONS (on_click uniquement + keys) ------------------------------
 def _on_click_web():
     _start_run("web", st.session_state.selected_school)
 
@@ -299,13 +323,13 @@ def _on_click_summary():
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.button("Scraper plateformes web", disabled=st.session_state.busy, on_click=_on_click_web)
+    st.button("Scraper plateformes web", key="btn_web", disabled=st.session_state.busy, on_click=_on_click_web)
 with col2:
-    st.button("Avis Google Business", disabled=st.session_state.busy, on_click=_on_click_gmb)
+    st.button("Avis Google Business", key="btn_gmb", disabled=st.session_state.busy, on_click=_on_click_gmb)
 with col3:
-    st.button("Mettre à jour le Sommaire", disabled=st.session_state.busy, on_click=_on_click_summary)
+    st.button("Mettre à jour le Sommaire", key="btn_summary", disabled=st.session_state.busy, on_click=_on_click_summary)
 with col4:
-    if st.button("🧹 Effacer les logs", disabled=st.session_state.busy):
+    if st.button("🧹 Effacer les logs", key="btn_clear", disabled=st.session_state.busy):
         st.session_state.logs.clear()
         render_logs()
 
