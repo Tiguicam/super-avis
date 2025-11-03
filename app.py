@@ -36,14 +36,30 @@ def render_logs():
 def _append_log(msg: str):
     """Ajoute un log seulement si le message n'a pas déjà été affiché (anti-doublon)."""
     msg = str(msg)
+
+    # filtrage : on ignore les logs techniques inutiles
+    skip = [
+        "Filtre école",
+        "Collecte pour",
+        "Web scraping terminé",
+    ]
+    if any(s in msg for s in skip):
+        return
+
+    # anti-doublon basé sur contenu
     if msg in st.session_state.log_msgs:
         return
+
+    # on mémorise le contenu unique ici
     st.session_state.log_msgs.add(msg)
+
+    # on affiche avec timestamp
     st.session_state.logs.append({
         "ts": datetime.now().strftime("%H:%M:%S"),
         "msg": msg
     })
     render_logs()
+
 
 def run_with_logs(func):
     """Exécute une action en affichant des logs simples, sans doublons."""
