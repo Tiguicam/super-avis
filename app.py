@@ -2,7 +2,6 @@ import streamlit as st
 import script_web
 import gmb
 import update_summary
-import sys
 from datetime import datetime
 
 # ----------------------------------------------------------
@@ -33,23 +32,20 @@ ECOLES = [
 selected = st.selectbox("Sélectionne une école :", ECOLES)
 
 # ----------------------------------------------------------
-# Zone de logs
+# Logs helpers
 # ----------------------------------------------------------
-logs_box = st.container()
+def add_log(msg: str):
+    st.session_state.logs.append({
+        "ts": datetime.now().strftime("%H:%M:%S"),
+        "msg": str(msg)
+    })
 
 def render_logs():
     if not st.session_state.logs:
-        logs_box.info("Aucun log pour le moment.")
+        st.info("Aucun log pour le moment.")
         return
     bullets = [f"- `{row['ts']}` {row['msg']}" for row in st.session_state.logs]
-    logs_box.markdown("\n".join(bullets))
-
-def _append_log(msg: str):
-    st.session_state.logs.append({
-        "ts": datetime.now().strftime("%H:%M:%S"),
-        "msg": msg
-    })
-    render_logs()
+    st.markdown("\n".join(bullets))
 
 # ----------------------------------------------------------
 # Wrapper d'exécution (antidoublon + UI propre)
@@ -60,19 +56,17 @@ def run_with_logs(func):
         return
 
     st.session_state.busy = True
-
-    # On vide les logs avant un nouveau run
-    st.session_state.logs = []
-    render_logs()
-
-    _append_log("⏳ En cours…")
-
     try:
-        # On fournit au script un logger minimaliste (append une seule ligne par message)
-        func(lambda msg: _append_log(str(msg)))
-        _append_log("✅ Terminé")
+        # reset logs pour un run propre
+        st.session_state.logs = []
+        add_log("⏳ En cours…")
+
+        # le logger passé aux scripts ajoute juste une ligne en mémoire
+        func(lambda msg: add_log(msg))
+
+        add_log("✅ Terminé")
     except Exception as e:
-        _append_log(f"❌ ERREUR : {e}")
+        add_log(f"❌ ERREUR : {e}")
     finally:
         st.session_state.busy = False
 
@@ -83,7 +77,6 @@ col_a, col_b = st.columns([1, 1])
 with col_a:
     if st.button("🧹 Effacer les logs", disabled=st.session_state.busy):
         st.session_state.logs = []
-        render_logs()
 
 with col_b:
     if st.session_state.logs:
@@ -95,11 +88,8 @@ with col_b:
             disabled=st.session_state.busy
         )
 
-# Affichage initial si rien n'a encore été écrit
-render_logs()
-
 # ----------------------------------------------------------
-# Boutons d'actions (un seul set, avec disabled pendant exécution)
+# Boutons d'actions (un seul set, disabled pendant exécution)
 # ----------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 
@@ -129,3 +119,8 @@ with col3:
             lambda logger: update_summary.run(logger=logger, school_filter=selected)
         )
     )
+
+# ----------------------------------------------------------
+# Affichage des logs (une seule fois par rerun)
+# ----------------------------------------------------------
+render_logs()
