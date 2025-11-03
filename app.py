@@ -1,6 +1,5 @@
 import streamlit as st
-import threading
-import queue
+import time
 from datetime import datetime
 
 import script_web
@@ -13,166 +12,116 @@ st.markdown("## 🧾 Super Avis – Interface Web")
 
 if "busy" not in st.session_state:
     st.session_state.busy = False
-
-if "worker" not in st.session_state:
-    st.session_state.worker = None
-
-if "log_queue" not in st.session_state:
-    st.session_state.log_queue = None
-
 if "logs" not in st.session_state:
     st.session_state.logs = []
-
 if "log_msgs" not in st.session_state:
-    st.session_state.log_msgs = set()   # ✅ anti-doublon
-
+    st.session_state.log_msgs = set()
 if "selected_school" not in st.session_state:
     st.session_state.selected_school = "TOUTES"
-
 
 # ------------------------------ ECOLES ------------------------------
 ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
 st.session_state.selected_school = st.selectbox(
     "Sélectionne une école :",
     ECOLES,
-    index=ECOLES.index(st.session_state.selected_school)
+    index=ECOLES.index(st.session_state.selected_school),
+    disabled=st.session_state.busy,  # évite de relancer un rerun pendant exécution
 )
-
 
 # ------------------------------ LOG UI ------------------------------
 logs_box = st.container()
 
-
-def render_logs():
-    """Affiche les logs"""
+def _render_logs():
     if not st.session_state.logs:
         logs_box.info("Aucun log pour le moment.")
         return
-
-    txt = "\n".join(
-        f"- `{row['ts']}` {row['msg']}" for row in st.session_state.logs
-    )
+    txt = "\n".join(f"- `{r['ts']}` {r['msg']}" for r in st.session_state.logs)
     logs_box.markdown(txt)
 
-
-def append_log(msg: str):
-    """Ajoute un log si nouveau (anti-doublon)"""
-    msg = str(msg)
-
-    # Anti-doublon strict
+def _append_log(msg: str):
+    msg = str(msg).strip()
+    if not msg:
+        return
+    # Anti-doublon strict : si le même message exact existe déjà, on ignore
     if msg in st.session_state.log_msgs:
         return
-
     st.session_state.log_msgs.add(msg)
-
     st.session_state.logs.append({
         "ts": datetime.now().strftime("%H:%M:%S"),
-        "msg": msg
+        "msg": msg,
     })
-    render_logs()
+    _render_logs()
+    # petit yield pour laisser Streamlit pousser l'UI
+    time.sleep(0.01)
 
+_render_logs()
 
-def drain_queue(q: queue.Queue | None):
-    """Récupère les messages venant du worker"""
-    if not q:
-        return False
-    done = False
-    try:
-        while True:
-            msg = q.get_nowait()
-            if msg == "__DONE__":
-                done = True
-                break
-            append_log(msg)
-    except queue.Empty:
-        pass
-    return done
+# ------------------------------ RUN WRAPPER (synchrone) ------------------------------
+def run_sync(task: str, school: str):
+    """Exécute la tâche en synchrone et stream les logs au fil de l'eau."""
+    if st.session_state.busy:
+        return
+    st.session_state.busy = True
 
+    # Reset seulement au démarrage d'un run (pas quand tu changes d'école)
+    st.session_state.logs = []
+    st.session_state.log_msgs = set()
+    _render_logs()
 
-# ------------------------------ WORKER ------------------------------
-def _worker(task: str, school: str, q: queue.Queue):
     def logger(m):
-        q.put(str(m))
+        _append_log(m)
 
     try:
-        logger("⏳ En cours…")
-
+        _append_log("⏳ En cours…")
         if task == "web":
             script_web.run(logger=logger, school_filter=school)
         elif task == "gmb":
             gmb.run(logger=logger, school_filter=school)
         elif task == "summary":
             update_summary.run(logger=logger, school_filter=school)
-
-        logger("✅ Terminé")
+        _append_log("✅ Terminé")
     except Exception as e:
-        logger(f"❌ ERREUR : {e}")
+        _append_log(f"❌ ERREUR : {e}")
     finally:
-        q.put("__DONE__")
+        st.session_state.busy = False
 
-
-# ------------------------------ START TASK ------------------------------
-def start_task(task_name: str):
-    if st.session_state.busy:
-        return
-
-    # reset logs
-    st.session_state.logs = []
-    st.session_state.log_msgs = set()
-
-    st.session_state.busy = True
-
-    q = queue.Queue()
-    st.session_state.log_queue = q
-
-    t = threading.Thread(target=_worker,
-                         args=(task_name, st.session_state.selected_school, q),
-                         daemon=True)
-    st.session_state.worker = t
-    t.start()
-
-
-# ------------------------------ ACTION BUTTONS ------------------------------
+# ------------------------------ BOUTONS ------------------------------
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.button("Scraper plateformes web",
-              disabled=st.session_state.busy,
-              on_click=lambda: start_task("web"))
+    st.button(
+        "Scraper plateformes web",
+        disabled=st.session_state.busy,
+        on_click=lambda: run_sync("web", st.session_state.selected_school),
+    )
 
 with col2:
-    st.button("Avis Google Business",
-              disabled=st.session_state.busy,
-              on_click=lambda: start_task("gmb"))
+    st.button(
+        "Avis Google Business",
+        disabled=st.session_state.busy,
+        on_click=lambda: run_sync("gmb", st.session_state.selected_school),
+    )
 
 with col3:
-    st.button("Mettre à jour le Sommaire",
-              disabled=st.session_state.busy,
-              on_click=lambda: start_task("summary"))
+    st.button(
+        "Mettre à jour le Sommaire",
+        disabled=st.session_state.busy,
+        on_click=lambda: run_sync("summary", st.session_state.selected_school),
+    )
 
 with col4:
-    st.button("🧹 Effacer les logs",
-              disabled=st.session_state.busy,
-              on_click=lambda: st.session_state.logs.clear())
-
-
-# Download logs
-if st.session_state.logs:
-    export_txt = "\n".join(
-        f"[{r['ts']}] {r['msg']}" for r in st.session_state.logs
+    st.button(
+        "🧹 Effacer les logs",
+        disabled=st.session_state.busy,
+        on_click=lambda: (st.session_state.logs.clear(), st.session_state.log_msgs.clear(), _render_logs()),
     )
-    st.download_button("⬇️ Télécharger les logs",
-                       data=export_txt,
-                       file_name="logs.txt",
-                       disabled=st.session_state.busy)
 
-
-# ------------------------------ QUEUE + DISPLAY ------------------------------
-finished = drain_queue(st.session_state.log_queue)
-
-if finished:
-    st.session_state.busy = False
-    st.session_state.worker = None
-    st.session_state.log_queue = None
-
-render_logs()
+# bouton de téléchargement
+if st.session_state.logs:
+    export_txt = "\n".join(f"[{r['ts']}] {r['msg']}" for r in st.session_state.logs)
+    st.download_button(
+        "⬇️ Télécharger les logs",
+        data=export_txt,
+        file_name="logs.txt",
+        disabled=st.session_state.busy,
+    )
