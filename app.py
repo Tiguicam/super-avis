@@ -1,102 +1,96 @@
+# app.py
 import streamlit as st
 from datetime import datetime
+
 import script_web
 import gmb
 import update_summary
 
-# ------------------------------------
-# INIT
-# ------------------------------------
+# --- UI de base ---
 st.set_page_config(page_title="Super Avis", layout="wide")
 st.markdown("## 🧾 Super Avis – Interface Web")
 
+# --- State ---
 if "busy" not in st.session_state:
     st.session_state.busy = False
-
 if "logs" not in st.session_state:
     st.session_state.logs = []
+if "log_msgs" not in st.session_state:
+    # set() des messages déjà vus → empêche les doublons visuels quand Streamlit rerun
+    st.session_state.log_msgs = set()
 
-if "selected_school" not in st.session_state:
-    st.session_state.selected_school = "TOUTES"
+# --- Sélecteur d’école ---
+ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
+selected = st.selectbox("Sélectionne une école :", ECOLES)
 
-
-# ------------------------------------
-# LISTE ÉCOLES
-# ------------------------------------
-ECOLES = [
-    "TOUTES",
-    "BRASSART",
-    "CREAD",
-    "EFAP",
-    "EFJ",
-    "ESEC",
-    "ICART",
-    "Ecole bleue",
-]
-
-selected = st.selectbox(
-    "Sélectionne une école :",
-    ECOLES,
-    index=ECOLES.index(st.session_state.selected_school),
-    disabled=st.session_state.busy,
-)
-st.session_state.selected_school = selected
-
-
-# ------------------------------------
-# LOG helpers
-# ------------------------------------
-log_box = st.container()
-
-def add_log(msg: str):
-    st.session_state.logs.append({
-        "ts": datetime.now().strftime("%H:%M:%S"),
-        "msg": str(msg),
-    })
-    render_logs()
+# --- Zone d’affichage des logs ---
+logs_box = st.container()
 
 def render_logs():
     if not st.session_state.logs:
-        log_box.info("Aucun log.")
+        logs_box.info("Aucun log pour le moment.")
         return
-    txt = "\n".join(f"- `{x['ts']}` {x['msg']}" for x in st.session_state.logs)
-    log_box.markdown(txt)
+    bullets = [f"- `{row['ts']}` {row['msg']}" for row in st.session_state.logs]
+    logs_box.markdown("\n".join(bullets))
 
+def _append_log(msg: str):
+    """Ajoute un log seulement si le message n'a pas déjà été affiché (anti-doublon)."""
+    msg = str(msg)
+    if msg in st.session_state.log_msgs:
+        return
+    st.session_state.log_msgs.add(msg)
+    st.session_state.logs.append({
+        "ts": datetime.now().strftime("%H:%M:%S"),
+        "msg": msg
+    })
+    render_logs()
 
-# ------------------------------------
-# WRAPPER
-# ------------------------------------
-def run_task(func):
+def run_with_logs(func):
+    """Exécute une action en affichant des logs simples, sans doublons."""
     if st.session_state.busy:
         return
-
     st.session_state.busy = True
-    st.session_state.logs = []   # reset une run = clair
-    add_log("⏳ En cours…")
+
+    # reset des logs à chaque run
+    st.session_state.logs = []
+    st.session_state.log_msgs = set()
+    render_logs()
 
     try:
-        func(lambda m: add_log(m))
-        add_log("✅ Terminé")
+        _append_log("⏳ En cours…")
+        # on passe notre logger anti-doublon au script appelé
+        func(lambda m: _append_log(m))
+        _append_log("✅ Terminé")
     except Exception as e:
-        add_log(f"❌ ERREUR : {e}")
+        _append_log(f"❌ ERREUR : {e}")
+    finally:
+        st.session_state.busy = False
 
-    st.session_state.busy = False
+# --- Barre d’actions (haut) ---
+col_a, col_b = st.columns([1, 1])
+with col_a:
+    if st.button("🧹 Effacer les logs", disabled=st.session_state.busy):
+        st.session_state.logs = []
+        st.session_state.log_msgs = set()
+        render_logs()
+with col_b:
+    if st.session_state.logs:
+        export_txt = "\n".join(f"[{r['ts']}] {r['msg']}" for r in st.session_state.logs)
+        st.download_button("⬇️ Télécharger les logs", data=export_txt, file_name="logs.txt",
+                           disabled=st.session_state.busy)
 
+# Affichage initial
+render_logs()
 
-# ------------------------------------
-# BOUTONS
-# ------------------------------------
-col1, col2, col3, col4 = st.columns(4)
+# --- Boutons d’actions (bas) ---
+col1, col2, col3 = st.columns(3)
 
 with col1:
     st.button(
         "Scraper plateformes web",
         disabled=st.session_state.busy,
-        on_click=lambda: run_task(
-            lambda logger: script_web.run(
-                logger=logger,
-                school_filter=st.session_state.selected_school
-            )
+        on_click=lambda: run_with_logs(
+            lambda logger: script_web.run(logger=logger, school_filter=selected)
         )
     )
 
@@ -104,11 +98,8 @@ with col2:
     st.button(
         "Avis Google Business",
         disabled=st.session_state.busy,
-        on_click=lambda: run_task(
-            lambda logger: gmb.run(
-                logger=logger,
-                school_filter=st.session_state.selected_school
-            )
+        on_click=lambda: run_with_logs(
+            lambda logger: gmb.run(logger=logger, school_filter=selected)
         )
     )
 
@@ -116,32 +107,7 @@ with col3:
     st.button(
         "Mettre à jour le Sommaire",
         disabled=st.session_state.busy,
-        on_click=lambda: run_task(
-            lambda logger: update_summary.run(
-                logger=logger,
-                school_filter=st.session_state.selected_school
-            )
+        on_click=lambda: run_with_logs(
+            lambda logger: update_summary.run(logger=logger, school_filter=selected)
         )
     )
-
-with col4:
-    st.button(
-        "🧹 Effacer logs",
-        disabled=st.session_state.busy,
-        on_click=lambda: (st.session_state.logs.clear(), render_logs())
-    )
-
-
-# ------------------------------------
-# DOWNLOAD
-# ------------------------------------
-if st.session_state.logs:
-    txt = "\n".join(f"[{x['ts']}] {x['msg']}" for x in st.session_state.logs)
-    st.download_button(
-        "⬇️ Télécharger logs",
-        data=txt,
-        file_name="logs.txt",
-        disabled=st.session_state.busy
-    )
-
-render_logs()
