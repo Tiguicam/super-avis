@@ -2,17 +2,24 @@ import streamlit as st
 import script_web
 import gmb
 import update_summary
-import io
 import sys
 from datetime import datetime
 
 # ----------------------------------------------------------
-# UI de base
+# État global
 # ----------------------------------------------------------
 st.set_page_config(page_title="Super Avis", layout="wide")
 st.markdown("## 🧾 Super Avis – Interface Web")
 
+if "busy" not in st.session_state:
+    st.session_state.busy = False
+
+if "logs" not in st.session_state:
+    st.session_state.logs = []
+
+# ----------------------------------------------------------
 # Liste des écoles
+# ----------------------------------------------------------
 ECOLES = [
     "TOUTES",
     "BRASSART",
@@ -26,11 +33,8 @@ ECOLES = [
 selected = st.selectbox("Sélectionne une école :", ECOLES)
 
 # ----------------------------------------------------------
-# État & conteneur de logs persistants
+# Zone de logs
 # ----------------------------------------------------------
-if "logs" not in st.session_state:
-    st.session_state.logs = []
-
 logs_box = st.container()
 
 def render_logs():
@@ -40,75 +44,88 @@ def render_logs():
     bullets = [f"- `{row['ts']}` {row['msg']}" for row in st.session_state.logs]
     logs_box.markdown("\n".join(bullets))
 
-# ----------------------------------------------------------
-# Capture des logs (append + re-render)
-# ----------------------------------------------------------
-class StreamLogger(io.StringIO):
-    def __init__(self, container):
-        super().__init__()
-        self.container = container
-
-    def write(self, msg: str):
-        # Découpe multi-lignes, ignore lignes vides
-        for line in msg.splitlines():
-            line = line.rstrip()
-            if not line:
-                continue
-            st.session_state.logs.append({
-                "ts": datetime.now().strftime("%H:%M:%S"),
-                "msg": line
-            })
-        render_logs()
-
-# ----------------------------------------------------------
-# Wrapper pour exécuter et afficher les logs
-# ----------------------------------------------------------
-def run_with_logs(func):
-    # feedback immédiat
-    st.session_state.logs.append({"ts": datetime.now().strftime("%H:%M:%S"), "msg": "⏳ En cours…"})
+def _append_log(msg: str):
+    st.session_state.logs.append({
+        "ts": datetime.now().strftime("%H:%M:%S"),
+        "msg": msg
+    })
     render_logs()
 
-    buffer = StreamLogger(logs_box)
-    old_stdout = sys.stdout
-    sys.stdout = buffer
+# ----------------------------------------------------------
+# Wrapper d'exécution (antidoublon + UI propre)
+# ----------------------------------------------------------
+def run_with_logs(func):
+    # Empêche les doubles exécutions
+    if st.session_state.busy:
+        return
+
+    st.session_state.busy = True
+
+    # On vide les logs avant un nouveau run
+    st.session_state.logs = []
+    render_logs()
+
+    _append_log("⏳ En cours…")
+
     try:
-        func(buffer.write)
-        buffer.write("✅ Terminé")
+        # On fournit au script un logger minimaliste (append une seule ligne par message)
+        func(lambda msg: _append_log(str(msg)))
+        _append_log("✅ Terminé")
     except Exception as e:
-        buffer.write(f"❌ ERREUR : {e}")
+        _append_log(f"❌ ERREUR : {e}")
     finally:
-        sys.stdout = old_stdout
+        st.session_state.busy = False
 
 # ----------------------------------------------------------
 # Actions sur les logs
 # ----------------------------------------------------------
 col_a, col_b = st.columns([1, 1])
 with col_a:
-    if st.button("🧹 Effacer les logs"):
+    if st.button("🧹 Effacer les logs", disabled=st.session_state.busy):
         st.session_state.logs = []
         render_logs()
 
 with col_b:
     if st.session_state.logs:
         export_txt = "\n".join(f"[{r['ts']}] {r['msg']}" for r in st.session_state.logs)
-        st.download_button("⬇️ Télécharger les logs", data=export_txt, file_name="logs.txt")
+        st.download_button(
+            "⬇️ Télécharger les logs",
+            data=export_txt,
+            file_name="logs.txt",
+            disabled=st.session_state.busy
+        )
 
 # Affichage initial si rien n'a encore été écrit
 render_logs()
 
 # ----------------------------------------------------------
-# Boutons d'actions
+# Boutons d'actions (un seul set, avec disabled pendant exécution)
 # ----------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    if st.button("Scraper plateformes web"):
-        run_with_logs(lambda logger: script_web.run(logger=logger, school_filter=selected))
+    st.button(
+        "Scraper plateformes web",
+        disabled=st.session_state.busy,
+        on_click=lambda: run_with_logs(
+            lambda logger: script_web.run(logger=logger, school_filter=selected)
+        )
+    )
 
 with col2:
-    if st.button("Avis Google Business"):
-        run_with_logs(lambda logger: gmb.run(logger=logger, school_filter=selected))
+    st.button(
+        "Avis Google Business",
+        disabled=st.session_state.busy,
+        on_click=lambda: run_with_logs(
+            lambda logger: gmb.run(logger=logger, school_filter=selected)
+        )
+    )
 
 with col3:
-    if st.button("Mettre à jour le Sommaire"):
-        run_with_logs(lambda logger: update_summary.run(logger=logger, school_filter=selected))
+    st.button(
+        "Mettre à jour le Sommaire",
+        disabled=st.session_state.busy,
+        on_click=lambda: run_with_logs(
+            lambda logger: update_summary.run(logger=logger, school_filter=selected)
+        )
+    )
