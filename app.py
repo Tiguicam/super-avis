@@ -2,15 +2,26 @@ import streamlit as st
 import re
 import time
 import uuid
+import sys
+import yaml
 from datetime import datetime
 from threading import Lock
+from pathlib import Path
+
 
 import script_web
 import gmb
 import update_summary
 
-# ------------------------------ INIT ------------------------------
 st.set_page_config(page_title="Super Avis", layout="wide")
+st.warning("DEBUG DEPLOY")
+st.write("python:", sys.version)
+st.write("platform:", sys.platform)
+st.write("cwd:", Path.cwd())
+st.write("__file__ parent:", Path(__file__).resolve().parent)
+st.write("Fichiers YAML vus:", [str(p) for p in Path.cwd().glob("**/*.y*ml")])
+# ------------------------------ INIT ------------------------------
+
 st.markdown("## 🧾 Super Avis – Interface Web")
 
 def _now_hms():
@@ -91,6 +102,17 @@ st.session_state.selected_school = st.selectbox(
     ECOLES,
     index=ECOLES.index(st.session_state.selected_school),
 )
+
+def load_yaml_safe(filename: str):
+    base = Path(__file__).resolve().parent
+    for p in [base/filename, base/"config"/filename, base.parent/filename, Path.cwd()/filename]:
+        if p.exists():
+            return yaml.safe_load(p.read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"YAML introuvable: {filename}")
+ecoles_cfg = load_yaml_safe("ecole.yaml")
+gmb_cfg = load_yaml_safe("gmb.yaml")
+# cfg = load_yaml_safe("config.yaml")
+
 
 # ------------------------------ LOGS UI ------------------------------
 logs_box = st.container()
@@ -291,9 +313,9 @@ def _start_run(task: str, school: str):
 
         try:
             if task == "web":
-                script_web.run(logger=logger, school_filter=school)
+                script_web.run(logger=logger, school_filter=school, config=ecoles_cfg)
             elif task == "gmb":
-                gmb.run(logger=logger, school_filter=school)
+                gmb.run(logger=logger, school_filter=school, config=gmb_cfg)
             elif task == "summary":
                 update_summary.run(logger=logger, school_filter=school)
 
@@ -333,7 +355,7 @@ def _on_click_gmb():
 
 def _on_click_summary():
     _start_run("summary", st.session_state.selected_school)
-    
+
 running = st.session_state.active_run_token is not None
 
 col1, col2, col3, col4 = st.columns(4)

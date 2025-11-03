@@ -426,12 +426,9 @@ def scrape_cust(url):
     return all_reviews
 
 # === CHARGEMENT YAML ===
+from utils import load_yaml_safe   # <= ajuste si pas le bon module
 def _load_yaml():
-    for fn in YAML_FILES:
-        if os.path.exists(fn):
-            with open(fn, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f)
-    raise FileNotFoundError("Aucun fichier YAML trouvé (ecole.yaml / ecoles.yaml).")
+    return load_yaml_safe("ecole.yaml")
 
 # === Sélection des écoles (filtre) ===
 def _select_ecoles(ECOLES: dict, school_filter=None, ecoles_choisies=None):
@@ -457,8 +454,9 @@ def _select_ecoles(ECOLES: dict, school_filter=None, ecoles_choisies=None):
     return keys
 
 # === MAIN (pour launcher) ===
-def run(logger=print, school_filter=None, ecoles_choisies=None):
-    cfg = _load_yaml()
+def run(logger=print, school_filter=None, ecoles_choisies=None, config=None):
+    cfg = config
+
     ECOLES = cfg["ecoles"]
 
     selected_keys = _select_ecoles(ECOLES, school_filter=school_filter, ecoles_choisies=ecoles_choisies)
@@ -516,9 +514,8 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
         run_soft_seen = set()
 
         for i, url in enumerate(urls, start=1):
-            # ✅ Progress avant traitement de l'URL
-            logger(f"PROGRESS {i}/{len(urls)}")
-            # 1) scrape l'URL
+
+            # 1) Scrape l'URL
             reviews = []
             try:
                 if "diplomeo.com" in url:
@@ -531,9 +528,11 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
                     reviews = []
             except Exception as e:
                 logger(f"🌍 {url} → ⚠️ erreur: {e}")
+                # ✅ Progression même si erreur
+                logger(f"PROGRESS {i}/{len(urls)}")
                 continue
 
-            # 2) dédoublonne localement (au cas où la page ait des duplicats)
+            # 2) dédoublonne localement
             uniq_url, seen_local = [], set()
             for r in reviews:
                 if r["uid"] in seen_local:
@@ -544,23 +543,23 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
             found = len(uniq_url)
             new_here, updated_here = 0, 0
 
-            # 3) décide : nouveau / mise à jour / ignoré
+            # 3) logique nouveau / update / ignore
             for r in uniq_url:
                 sk = soft_key_from_values(r.get("site", ""), r.get("prenom", ""), r.get("texte", ""))
-                if sk not in run_soft_seen:
-                        run_soft_seen.add(sk)
 
-                # si l'UID exact existe déjà, on ignore (même source exacte)
+                if sk not in run_soft_seen:
+                    run_soft_seen.add(sk)
+
+                # déjà vu via uid exact
                 if r["uid"] in existing_uid:
                     continue
 
-                sk = soft_key_from_values(r.get("site", ""), r.get("prenom", ""), r.get("texte", ""))
-
-                # existe déjà via soft-key → possible MAJ date/année
+                # existe via soft key ?
                 if sk in existing_soft:
                     info = existing_soft[sk]
                     new_date  = r.get("date", "") or ""
                     new_annee = r.get("annee", "") or ""
+
                     if new_date != info["date"] or new_annee != info["annee"]:
                         rownum = info["row"]
                         if rownum:
@@ -573,24 +572,32 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
                                 "values": [[new_annee]],
                             })
                             updated_here += 1
-                            # garder en mémoire la dernière valeur pour éviter de re-MAJ
-                            existing_soft[sk]["date"] = new_date
-                            existing_soft[sk]["annee"] = new_annee
-                    # sinon pas de changement
+
+                        # update cache
+                        existing_soft[sk]["date"] = new_date
+                        existing_soft[sk]["annee"] = new_annee
+
                     continue
 
-                # sinon : c'est un vrai nouveau
+                # nouveau
                 pending_new_rows.append([r.get(k, "") for k in EXPECTED_HEADERS])
                 existing_uid.add(r["uid"])
-                existing_soft[sk] = {"row": None, "date": r.get("date", "") or "", "annee": r.get("annee", "") or ""}
+                existing_soft[sk] = {
+                    "row": None,
+                    "date": r.get("date", "") or "",
+                    "annee": r.get("annee", "") or "",
+                }
                 new_here += 1
 
             total_found += found
             total_new += new_here
             total_updated += updated_here
 
-            # 4) LOG **une seule ligne** pour l'URL
+            # 4) Log
             logger(f"🌍 {url} → {found} avis  |  +{new_here} nouveaux, ♻️ {updated_here} MAJ")
+
+            # ✅ PROGRESS : à la fin
+            logger(f"PROGRESS {i}/{len(urls)}")
 
         # 5) Appliquer d’abord les MAJ, puis les ajouts
         if pending_updates:

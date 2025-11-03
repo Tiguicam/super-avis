@@ -339,8 +339,13 @@ def _row_to_values(row_dict):
     return [row_dict.get(k, "") for k in EXPECTED_HEADERS]
 
 # ----------------------------------------------------------------
-def main(school_filter=None, logger=print):
-    gmb_entries = load_gmb_yaml(GMB_YAML_FILE)
+def main(school_filter=None, logger=print, config=None):
+    # si l'app Streamlit fournit la config, on l'utilise
+    if config is not None:
+        gmb_entries = config.get("gmb", [])
+    else:
+        # fallback lecture fichier en local
+        gmb_entries = load_gmb_yaml(GMB_YAML_FILE)
     if not gmb_entries:
         logger("❌ Aucun bloc 'gmb' trouvé")
         return
@@ -415,11 +420,12 @@ def main(school_filter=None, logger=print):
 
 
 # ----------------------------------------------------------------
-def run(logger=print, school_filter=None):
+def run(logger=print, school_filter=None, config=None):
     import builtins
     _old_print = builtins.print
     try:
         builtins.print = logger
-        main(school_filter=school_filter, logger=logger)
+        main(school_filter=school_filter, logger=logger, config=config)
     finally:
         builtins.print = _old_print
+
