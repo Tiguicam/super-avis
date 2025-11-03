@@ -512,6 +512,9 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
         # Totaux par école
         total_found, total_new, total_updated = 0, 0, 0
 
+        # ➜ Uniques DU RUN (dédoublonnés via soft-key site+prenom+texte)
+        run_soft_seen = set()
+
         for url in urls:
             # 1) scrape l'URL
             reviews = []
@@ -541,6 +544,10 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
 
             # 3) décide : nouveau / mise à jour / ignoré
             for r in uniq_url:
+                sk = soft_key_from_values(r.get("site", ""), r.get("prenom", ""), r.get("texte", ""))
+                if sk not in run_soft_seen:
+                        run_soft_seen.add(sk)
+
                 # si l'UID exact existe déjà, on ignore (même source exacte)
                 if r["uid"] in existing_uid:
                     continue
@@ -590,7 +597,13 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
             sheet.append_rows(pending_new_rows, value_input_option="RAW")
 
         # 6) Résumé par école
-        logger(f"📊 {ecole} → total {total_found} avis  |  +{total_new} nouveaux, ♻️ {total_updated} MAJ")
 
-    logger("\n✅ Web scraping terminé !")
+        # ➜ Uniques DANS CE RUN (cross-plateformes)
+        uniques_in_run = len(run_soft_seen)
+
+        # (A) ligne "uniques" pour que l'app assemble la finale
+        logger(f"📊 {ecole} → uniques {uniques_in_run}")
+
+        # (B) conserve ta ligne "total ..." (brut/new/maj) déjà présente
+        logger(f"📊 {ecole} → total {total_found} avis  |  +{total_new} nouveaux, ♻️ {total_updated} MAJ")
 
