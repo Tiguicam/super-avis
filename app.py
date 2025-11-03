@@ -25,6 +25,7 @@ def _normalize_msg(s: str) -> str:
 
 # Regex & constantes
 URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
+# ponctuation finale élargie (flèches, tirets, guillemets FR, ellipses, etc.)
 TRAIL_PUNCT = ")]>;,.!?’’\"—–-→…:»«·"
 
 # Ressources partagées (verrous)
@@ -80,6 +81,12 @@ render_logs()
 
 # ------------------------------ DEDUP HELPERS ------------------------------
 def _dedup_key(raw_msg: str) -> str:
+    """
+    Clé de déduplication stable :
+    - priorité à l'URL si elle existe (sans ponctuation finale élargie)
+    - sinon messages 'système' mappés sur une clé fixe
+    - sinon message normalisé (sans '— RUN HH:MM:SS • ... —')
+    """
     s = str(raw_msg)
     txt = _normalize_msg(s)
 
@@ -105,7 +112,7 @@ def _dedup_key(raw_msg: str) -> str:
         url = m.group(1).rstrip(TRAIL_PUNCT)
         return f"url::{url.lower()}"
 
-    # enlève préfixe RUN pour stabiliser
+    # enlève un éventuel préfixe de type '— RUN HH:MM:SS • ... —'
     s2 = re.sub(
         r"^—\s*RUN\s*\d{2}:\d{2}:\d{2}\s*•\s*[^—]+—\s*",
         "",
@@ -119,6 +126,7 @@ def _should_skip_by_key(key: str) -> bool:
     if not key:
         return True
     if st.session_state.run_id is None:
+        # pas de run actif -> on n'affiche rien
         return True
     return key in st.session_state.seen_keys
 
@@ -127,11 +135,15 @@ def _remember_key(key: str):
 
 # ------------------------------ LOG APPEND (ATOMIQUE) ------------------------------
 def append_log(msg: str):
+    """
+    Append atomique + dédup via clé stable.
+    On évite aussi deux messages strictement identiques d'affilée.
+    """
     raw = str(msg)
     norm = _normalize_msg(raw)
     key = _dedup_key(raw)
 
-    # filet de sécurité consécutif
+    # filet de sécurité: même message que le précédent -> skip
     if st.session_state.last_norm_msg == norm:
         return
 
@@ -144,6 +156,7 @@ def append_log(msg: str):
         st.session_state.last_norm_msg = norm
         st.session_state.last_key = key
 
+    # rafraîchit l'UI
     render_logs()
     time.sleep(0.003)
 
@@ -151,13 +164,15 @@ def append_log(msg: str):
 def _start_run(task: str, school: str):
     """
     Lance un run si et seulement si aucun run n'est déjà actif.
-    Protégé par un verrou global non bloquant (anti-multi-run).
+    Protégé par un verrou global + garde busy (anti-multi-run).
     """
-    run_lock = _get_run_lock()
+    # garde immédiate (imperméable aux reruns Streamlit)
+    if st.session_state.busy:
+        return
 
+    run_lock = _get_run_lock()
     # essai non bloquant: si quelqu'un d'autre tourne, on sort
     if not run_lock.acquire(blocking=False):
-        # un run est déjà en cours quelque part -> on n'en lance pas un 2e
         return
 
     try:
@@ -166,9 +181,8 @@ def _start_run(task: str, school: str):
         if now - st.session_state.last_start_epoch < 0.25:
             return
         st.session_state.last_start_epoch = now
-        if st.session_state.busy:
-            return
 
+        # marque busy -> bloquera tout nouvel appel jusqu'à libération
         st.session_state.busy = True
         st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
         # reset dédup & panneau vierge par run
@@ -203,7 +217,7 @@ def _start_run(task: str, school: str):
         except RuntimeError:
             pass
 
-# ------------------------------ BOUTONS (on_click) ------------------------------
+# ------------------------------ BOUTONS (on_click uniquement) ------------------------------
 def _on_click_web():
     _start_run("web", st.session_state.selected_school)
 
