@@ -10,15 +10,24 @@ import update_summary
 st.set_page_config(page_title="Super Avis", layout="wide")
 st.markdown("## 🧾 Super Avis – Interface Web")
 
-# État persistant
+def _now_hms():
+    return datetime.now().strftime("%H:%M:%S")
+
+# Session state
 if "busy" not in st.session_state:
     st.session_state.busy = False
 if "logs" not in st.session_state:
-    st.session_state.logs = []           # liste affichée
-if "seen_msgs" not in st.session_state:
-    st.session_state.seen_msgs = set()   # anti-doublon global (ne se réinitialise pas)
+    st.session_state.logs = []              # historique affiché
 if "selected_school" not in st.session_state:
     st.session_state.selected_school = "TOUTES"
+
+# Ces deux clés seront recréées à CHAQUE nouveau run (anti-doublon par exécution)
+if "run_id" not in st.session_state:
+    st.session_state.run_id = None          # id courant d'exécution (None si rien en cours)
+if "seen_in_run" not in st.session_state:
+    st.session_state.seen_in_run = set()    # (run_id, msg) déjà ajoutés pour CE run
+if "header_done_for" not in st.session_state:
+    st.session_state.header_done_for = set()  # run_ids pour lesquels l'entête a été ajoutée
 
 # ------------------------------ ECOLES ------------------------------
 ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
@@ -26,7 +35,7 @@ st.session_state.selected_school = st.selectbox(
     "Sélectionne une école :",
     ECOLES,
     index=ECOLES.index(st.session_state.selected_school),
-    disabled=st.session_state.busy,   # évite les reruns pendant l’exécution
+    disabled=st.session_state.busy,  # évite les relances pendant un run
 )
 
 # ------------------------------ LOGS UI ------------------------------
@@ -40,35 +49,44 @@ def render_logs():
     logs_box.markdown(txt)
 
 def append_log(msg: str):
-    """Ajoute un log SI et seulement si on ne l’a jamais vu (anti-doublon global)."""
+    """
+    Ajoute une ligne SI pas déjà vue pour le run courant.
+    Dédupe strictement par (run_id, msg) → aucune répétition même si Streamlit rerun.
+    """
     msg = (msg or "").strip()
-    if not msg:
+    if not msg or st.session_state.run_id is None:
         return
-    if msg in st.session_state.seen_msgs:
+    key = (st.session_state.run_id, msg)
+    if key in st.session_state.seen_in_run:
         return
-    st.session_state.seen_msgs.add(msg)
-    st.session_state.logs.append({
-        "ts": datetime.now().strftime("%H:%M:%S"),
-        "msg": msg,
-    })
+    st.session_state.seen_in_run.add(key)
+    st.session_state.logs.append({"ts": _now_hms(), "msg": msg})
     render_logs()
-    time.sleep(0.01)  # petit yield pour pousser l'UI
+    # petit yield pour laisser l'UI peindre pendant un long traitement
+    time.sleep(0.01)
 
 render_logs()
 
-# ------------------------------ RUNNER SYNCHRONE ------------------------------
-def run_sync(task: str, school: str):
-    """Exécute en synchrone et ‘stream’ les logs au fil de l’eau, sans doublons."""
+# ------------------------------ RUNNER ------------------------------
+def _start_run(task: str, school: str):
+    """Démarre une exécution synchrone isolée par run_id + anti-doublon local."""
     if st.session_state.busy:
         return
     st.session_state.busy = True
+    # nouveau run → nouveau run_id et reset du set de déduplication local
+    st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
+    st.session_state.seen_in_run = set()
 
-    # Ligne de séparation pour visualiser les runs successifs (n'efface rien)
-    sep = f"— RUN {datetime.now().strftime('%H:%M:%S')} • {task.upper()} • {school} —"
-    append_log(sep)
+    # entête du run (garantie 1x pour ce run)
+    if st.session_state.run_id not in st.session_state.header_done_for:
+        header = f"— RUN { _now_hms() } • {task.upper()} • {school} —"
+        append_log(header)
+        st.session_state.header_done_for.add(st.session_state.run_id)
+
     append_log("⏳ En cours…")
 
     def logger(m):
+        # tout ce que tes scripts loguent passe ici → dédupe (run_id, msg)
         append_log(str(m))
 
     try:
@@ -82,7 +100,9 @@ def run_sync(task: str, school: str):
     except Exception as e:
         append_log(f"❌ ERREUR : {e}")
     finally:
+        # fin du run
         st.session_state.busy = False
+        st.session_state.run_id = None  # ferme l’exécution courante
 
 # ------------------------------ BOUTONS ------------------------------
 col1, col2, col3, col4 = st.columns(4)
@@ -91,21 +111,21 @@ with col1:
     st.button(
         "Scraper plateformes web",
         disabled=st.session_state.busy,
-        on_click=lambda: run_sync("web", st.session_state.selected_school),
+        on_click=lambda: _start_run("web", st.session_state.selected_school),
     )
 
 with col2:
     st.button(
         "Avis Google Business",
         disabled=st.session_state.busy,
-        on_click=lambda: run_sync("gmb", st.session_state.selected_school),
+        on_click=lambda: _start_run("gmb", st.session_state.selected_school),
     )
 
 with col3:
     st.button(
         "Mettre à jour le Sommaire",
         disabled=st.session_state.busy,
-        on_click=lambda: run_sync("summary", st.session_state.selected_school),
+        on_click=lambda: _start_run("summary", st.session_state.selected_school),
     )
 
 with col4:
