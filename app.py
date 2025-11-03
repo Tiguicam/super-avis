@@ -10,12 +10,13 @@ import update_summary
 st.set_page_config(page_title="Super Avis", layout="wide")
 st.markdown("## 🧾 Super Avis – Interface Web")
 
+# État persistant
 if "busy" not in st.session_state:
     st.session_state.busy = False
 if "logs" not in st.session_state:
-    st.session_state.logs = []
-if "log_msgs" not in st.session_state:
-    st.session_state.log_msgs = set()
+    st.session_state.logs = []           # liste affichée
+if "seen_msgs" not in st.session_state:
+    st.session_state.seen_msgs = set()   # anti-doublon global (ne se réinitialise pas)
 if "selected_school" not in st.session_state:
     st.session_state.selected_school = "TOUTES"
 
@@ -25,63 +26,61 @@ st.session_state.selected_school = st.selectbox(
     "Sélectionne une école :",
     ECOLES,
     index=ECOLES.index(st.session_state.selected_school),
-    disabled=st.session_state.busy,  # évite de relancer un rerun pendant exécution
+    disabled=st.session_state.busy,   # évite les reruns pendant l’exécution
 )
 
-# ------------------------------ LOG UI ------------------------------
+# ------------------------------ LOGS UI ------------------------------
 logs_box = st.container()
 
-def _render_logs():
+def render_logs():
     if not st.session_state.logs:
         logs_box.info("Aucun log pour le moment.")
         return
     txt = "\n".join(f"- `{r['ts']}` {r['msg']}" for r in st.session_state.logs)
     logs_box.markdown(txt)
 
-def _append_log(msg: str):
-    msg = str(msg).strip()
+def append_log(msg: str):
+    """Ajoute un log SI et seulement si on ne l’a jamais vu (anti-doublon global)."""
+    msg = (msg or "").strip()
     if not msg:
         return
-    # Anti-doublon strict : si le même message exact existe déjà, on ignore
-    if msg in st.session_state.log_msgs:
+    if msg in st.session_state.seen_msgs:
         return
-    st.session_state.log_msgs.add(msg)
+    st.session_state.seen_msgs.add(msg)
     st.session_state.logs.append({
         "ts": datetime.now().strftime("%H:%M:%S"),
         "msg": msg,
     })
-    _render_logs()
-    # petit yield pour laisser Streamlit pousser l'UI
-    time.sleep(0.01)
+    render_logs()
+    time.sleep(0.01)  # petit yield pour pousser l'UI
 
-_render_logs()
+render_logs()
 
-# ------------------------------ RUN WRAPPER (synchrone) ------------------------------
+# ------------------------------ RUNNER SYNCHRONE ------------------------------
 def run_sync(task: str, school: str):
-    """Exécute la tâche en synchrone et stream les logs au fil de l'eau."""
+    """Exécute en synchrone et ‘stream’ les logs au fil de l’eau, sans doublons."""
     if st.session_state.busy:
         return
     st.session_state.busy = True
 
-    # Reset seulement au démarrage d'un run (pas quand tu changes d'école)
-    st.session_state.logs = []
-    st.session_state.log_msgs = set()
-    _render_logs()
+    # Ligne de séparation pour visualiser les runs successifs (n'efface rien)
+    sep = f"— RUN {datetime.now().strftime('%H:%M:%S')} • {task.upper()} • {school} —"
+    append_log(sep)
+    append_log("⏳ En cours…")
 
     def logger(m):
-        _append_log(m)
+        append_log(str(m))
 
     try:
-        _append_log("⏳ En cours…")
         if task == "web":
             script_web.run(logger=logger, school_filter=school)
         elif task == "gmb":
             gmb.run(logger=logger, school_filter=school)
         elif task == "summary":
             update_summary.run(logger=logger, school_filter=school)
-        _append_log("✅ Terminé")
+        append_log("✅ Terminé")
     except Exception as e:
-        _append_log(f"❌ ERREUR : {e}")
+        append_log(f"❌ ERREUR : {e}")
     finally:
         st.session_state.busy = False
 
@@ -113,10 +112,10 @@ with col4:
     st.button(
         "🧹 Effacer les logs",
         disabled=st.session_state.busy,
-        on_click=lambda: (st.session_state.logs.clear(), st.session_state.log_msgs.clear(), _render_logs()),
+        on_click=lambda: (st.session_state.logs.clear(), render_logs()),
     )
 
-# bouton de téléchargement
+# ------------------------------ EXPORT ------------------------------
 if st.session_state.logs:
     export_txt = "\n".join(f"[{r['ts']}] {r['msg']}" for r in st.session_state.logs)
     st.download_button(
