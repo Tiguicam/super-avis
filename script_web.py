@@ -601,9 +601,7 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
         # ➜ Uniques DANS CE RUN (cross-plateformes)
         uniques_in_run = len(run_soft_seen)
 
-        # (A) ligne "uniques" pour que l'app assemble la finale
-        logger(f"📊 {ecole} → uniques {uniques_in_run}")
-
-        # (B) conserve ta ligne "total ..." (brut/new/maj) déjà présente
-        logger(f"📊 {ecole} → total {total_found} avis  |  +{total_new} nouveaux, ♻️ {total_updated} MAJ")
-
+        # (A) Résumé complet
+        logger(
+            f"📊 {ecole} → brut {total_found} | écrit sheet {uniques_in_run} | +{total_new} nouveaux | maj +{total_updated}"
+        )

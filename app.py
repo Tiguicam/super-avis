@@ -131,7 +131,9 @@ def _dedup_key(raw_msg: str) -> str:
         m = re.search(r"Collecte pour\s+(.+?)…?$", txt)
         school = _normalize_msg(m.group(1)) if m else ""
         return f"sys::collect::{school.lower()}"
-
+    if txt.startswith("📊 "):
+        return "sys::summary::" + txt.lower()
+    
     # URL prioritaire
     m = URL_RE.search(s)
     if m:
