@@ -90,7 +90,6 @@ st.session_state.selected_school = st.selectbox(
     "Sélectionne une école :",
     ECOLES,
     index=ECOLES.index(st.session_state.selected_school),
-    disabled=st.session_state.busy,
 )
 
 # ------------------------------ LOGS UI ------------------------------
@@ -334,16 +333,18 @@ def _on_click_gmb():
 
 def _on_click_summary():
     _start_run("summary", st.session_state.selected_school)
+    
+running = st.session_state.active_run_token is not None
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.button("Scraper plateformes web", key="btn_web", disabled=st.session_state.busy, on_click=_on_click_web)
+    st.button("Scraper plateformes web", key="btn_web", disabled=running, on_click=_on_click_web)
 with col2:
-    st.button("Avis Google Business", key="btn_gmb", disabled=st.session_state.busy, on_click=_on_click_gmb)
+    st.button("Avis Google Business", key="btn_gmb", disabled=running, on_click=_on_click_gmb)
 with col3:
-    st.button("Mettre à jour le Sommaire", key="btn_summary", disabled=st.session_state.busy, on_click=_on_click_summary)
+    st.button("Mettre à jour le Sommaire", key="btn_summary", disabled=running, on_click=_on_click_summary)
 with col4:
-    if st.button("🧹 Effacer les logs", key="btn_clear", disabled=st.session_state.busy):
+    if st.button("🧹 Effacer les logs", key="btn_clear"):
         st.session_state.logs.clear()
   
 

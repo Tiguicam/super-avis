@@ -408,7 +408,8 @@ def main(school_filter=None, logger=print):
             ws.append_rows(pending_rows, value_input_option="RAW")
 
         # résumé par école
-        logger(f"📊 {name} → total {total_found} avis  |  +{total_new} nouveaux")
+        logger(f"📊 {name} → total {total_found} avis  |  +{total_new} nouveaux, ♻️ 0 MAJ")
+        logger(f"📊 {name} → uniques {total_found}")
 
     logger("\n✅ FIN\n")
 
