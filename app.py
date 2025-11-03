@@ -25,21 +25,22 @@ def _normalize_msg(s: str) -> str:
 
 # Regex & constantes
 URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
-# ponctuation finale élargie (flèches, tirets, guillemets FR, ellipses, etc.)
-TRAIL_PUNCT = ")]>;,.!?’’\"—–-→…:»«·"
+TRAIL_PUNCT = ")]>;,.!?’’\"—–-→…:»«·"  # ponctuation finale élargie
 
-# 📊 LIGNE D'AUTORITÉ (Option A) — format EXACT souhaité :
-# "📊 CREAD → brut 24 | écrit sheet 17 | +0 nouveaux  | maj +7"
-# (tolère 'écrit' ou 'ecrit', espaces multiples, + facultatifs)
-RE_AUTHORITY = re.compile(
-    r"""^📊\s*
-        (?P<school>.+?)\s*→\s*
-        brut\s*(?P<brut>\d+)\s*\|\s*
-        (?:écrit|ecrit)\s*sheet\s*(?P<sheet>\d+)\s*\|\s*
-        \+?(?P<new>\d+)\s*nouveaux\s*\|\s*
-        maj\s*\+?(?P<maj>\d+)\s*$
-    """,
-    re.IGNORECASE | re.VERBOSE
+# 📊 Formats parsés
+# 1) Ton ancien total (brut) : "📊 CREAD → total 24 avis | +0 nouveaux, ♻️ 7 MAJ"
+RE_TOTAL_BRUT = re.compile(
+    r"^📊\s*(?P<school>.+?)\s*→\s*total\s*(?P<brut>\d+)\s*avis\s*\|\s*\+(?P<new>\d+)\s*nouveaux,?\s*♻️\s*(?P<maj>\d+)\s*MAJ\s*$",
+    re.IGNORECASE
+)
+
+# 2) Une ligne uniques que ton script doit ajouter (une des variantes ci-dessous)
+#    - "📊 CREAD → uniques 17"
+#    - "📊 CREAD → total avis uniques 17"
+#    - "📊 CREAD → écrit sheet 17"
+RE_UNIQUES = re.compile(
+    r"^📊\s*(?P<school>.+?)\s*→\s*(?:uniques|total\s*avis\s*uniques|(?:écrit|ecrit)\s*sheet)\s*(?P<uniques>\d+)\s*$",
+    re.IGNORECASE
 )
 
 # Ressources partagées (verrous)
@@ -72,9 +73,11 @@ if "last_norm_msg" not in st.session_state:
 if "last_key" not in st.session_state:
     st.session_state.last_key = None
 
-# Résumé d'autorité (rempli si ligne 📊 reçue)
-if "authoritative_summary" not in st.session_state:
-    st.session_state.authoritative_summary = None  # dict: {"school","brut","sheet","new","maj"}
+# Stockage des infos parsées pour synthèse finale
+if "final_parts" not in st.session_state:
+    st.session_state.final_parts = {}  # school -> {"brut":int,"new":int,"maj":int,"uniques":int}
+if "final_emitted" not in st.session_state:
+    st.session_state.final_emitted = set()  # schools déjà synthétisées
 
 # ------------------------------ ECOLES ------------------------------
 ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
@@ -151,31 +154,59 @@ def _should_skip_by_key(key: str) -> bool:
 def _remember_key(key: str):
     st.session_state.seen_keys.add(key)
 
-# ------------------------------ PARSING LIGNE 📊 D'AUTORITÉ ------------------------------
-def _ingest_authority_line(msg_norm: str):
+# ------------------------------ PARSING & SYNTHÈSE ------------------------------
+def _capture_parts(msg_norm: str):
     """
-    Capture la ligne d'autorité EXACTE :
-    📊 SCHOOL → brut N | écrit sheet M | +X nouveaux  | maj +Y
-    (on ne réémet PAS cette ligne pour éviter un doublon dans les logs)
+    Capture les morceaux de la ligne finale :
+    - brut/new/maj depuis "total ... | +... nouveaux, ♻️ ... MAJ"
+    - uniques depuis "uniques N" ou "écrit sheet N"
+    Quand on a tout pour une école, on émet la synthèse finale.
     """
-    m = RE_AUTHORITY.search(msg_norm)
-    if not m:
-        return False
-    st.session_state.authoritative_summary = {
-        "school": _normalize_msg(m.group("school")),
-        "brut": int(m.group("brut")),
-        "sheet": int(m.group("sheet")),
-        "new": int(m.group("new")),
-        "maj": int(m.group("maj")),
-    }
-    return True
+    m_total = RE_TOTAL_BRUT.search(msg_norm)
+    if m_total:
+        school = _normalize_msg(m_total.group("school"))
+        d = st.session_state.final_parts.setdefault(school, {})
+        d["brut"] = int(m_total.group("brut"))
+        d["new"] = int(m_total.group("new"))
+        d["maj"] = int(m_total.group("maj"))
+        _maybe_emit_final(school)
+        return True
+
+    m_uni = RE_UNIQUES.search(msg_norm)
+    if m_uni:
+        school = _normalize_msg(m_uni.group("school"))
+        d = st.session_state.final_parts.setdefault(school, {})
+        d["uniques"] = int(m_uni.group("uniques"))
+        _maybe_emit_final(school)
+        return True
+
+    return False
+
+def _maybe_emit_final(school: str):
+    """
+    Émet la ligne finale exactement au format demandé quand on a :
+    - brut
+    - uniques ( = "écrit sheet")
+    - new
+    - maj
+    Une seule émission par école.
+    """
+    if school in st.session_state.final_emitted:
+        return
+    d = st.session_state.final_parts.get(school, {})
+    needed = all(k in d for k in ("brut", "uniques", "new", "maj"))
+    if not needed:
+        return
+    # émettre la ligne finale
+    append_log(f"📊 {school} → brut {d['brut']} | écrit sheet {d['uniques']} | +{d['new']} nouveaux | maj +{d['maj']}")
+    st.session_state.final_emitted.add(school)
 
 # ------------------------------ LOG APPEND (ATOMIQUE) ------------------------------
 def append_log(msg: str):
     """
     Append atomique + dédup via clé stable.
     On évite aussi deux messages strictement identiques d'affilée.
-    On ingère la ligne 📊 d'autorité si elle passe, sans la réémettre.
+    On capture les morceaux de la ligne finale si on les voit passer.
     """
     raw = str(msg)
     norm = _normalize_msg(raw)
@@ -185,8 +216,8 @@ def append_log(msg: str):
     if st.session_state.last_norm_msg == norm:
         return
 
-    # Ingestion éventuelle de la ligne d'autorité 📊
-    _ingest_authority_line(norm)
+    # Capture des morceaux avant l'ajout dans la liste (pour pouvoir réémettre via append_log)
+    _capture_parts(norm)
 
     lock = _get_log_lock()
     with lock:
@@ -207,31 +238,28 @@ def _start_run(task: str, school: str):
     Lance un run si et seulement si aucun run n'est déjà actif.
     Protégé par un verrou global + garde busy (anti-multi-run).
     """
-    # garde immédiate (imperméable aux reruns Streamlit)
     if st.session_state.busy:
         return
 
     run_lock = _get_run_lock()
-    # essai non bloquant: si quelqu'un d'autre tourne, on sort
     if not run_lock.acquire(blocking=False):
         return
 
     try:
-        # anti double-clic très rapproché
         now = time.time()
         if now - st.session_state.last_start_epoch < 0.25:
             return
         st.session_state.last_start_epoch = now
 
-        # marque busy -> bloquera tout nouvel appel jusqu'à libération
         st.session_state.busy = True
         st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
-        # reset dédup & panneau vierge par run
+        # reset par run
         st.session_state.seen_keys = set()
         st.session_state.logs = []
         st.session_state.last_norm_msg = None
         st.session_state.last_key = None
-        st.session_state.authoritative_summary = None  # reset
+        st.session_state.final_parts = {}
+        st.session_state.final_emitted = set()
 
         append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
         append_log("⏳ En cours…")
@@ -247,7 +275,6 @@ def _start_run(task: str, school: str):
             elif task == "summary":
                 update_summary.run(logger=logger, school_filter=school)
 
-            # ⚠️ PAS de récap auto : on s'appuie sur la ligne 📊 émise par script_web
             append_log("✅ Terminé")
         except Exception as e:
             append_log(f"❌ ERREUR : {e}")
@@ -255,7 +282,6 @@ def _start_run(task: str, school: str):
             st.session_state.busy = False
             st.session_state.run_id = None
     finally:
-        # libère le verrou de run quoi qu'il arrive
         try:
             run_lock.release()
         except RuntimeError:
