@@ -160,4 +160,5 @@ _render_logs()
 
 # Rafraîchissement automatique tant que worker actif
 if st.session_state.busy:
-    st.experimental_rerun()
+    st.rerun()
+
