@@ -19,20 +19,22 @@ def _normalize_msg(s: str) -> str:
     if not s:
         return ""
     s = s.replace("\r", "")
-    # supprime caractères invisibles courants
     for ch in ("\u200b", "\u200c", "\ufeff"):
         s = s.replace(ch, "")
-    # normalise espaces
     return " ".join(s.strip().split())
 
 # Regex & constantes
 URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
-# ponctuation finale élargie (flèches, tirets, guillemets FR, points de suspension, etc.)
 TRAIL_PUNCT = ")]>;,.!?’’\"—–-→…:»«·"
 
-# Ressources partagées (verrou global pour append_log)
+# Ressources partagées (verrous)
 @st.cache_resource
 def _get_log_lock():
+    return Lock()
+
+@st.cache_resource
+def _get_run_lock():
+    # verrou maître: un seul run à la fois au niveau process
     return Lock()
 
 # ------------------------------ STATE GLOBAL ------------------------------
@@ -47,11 +49,9 @@ if "selected_school" not in st.session_state:
 if "run_id" not in st.session_state:
     st.session_state.run_id = None
 if "seen_keys" not in st.session_state:
-    st.session_state.seen_keys = set()  # clés de déduplication vues durant ce run
+    st.session_state.seen_keys = set()
 if "last_start_epoch" not in st.session_state:
     st.session_state.last_start_epoch = 0.0
-
-# mémorise le dernier message normalisé et la dernière clé (filet de sécu)
 if "last_norm_msg" not in st.session_state:
     st.session_state.last_norm_msg = None
 if "last_key" not in st.session_state:
@@ -80,16 +80,10 @@ render_logs()
 
 # ------------------------------ DEDUP HELPERS ------------------------------
 def _dedup_key(raw_msg: str) -> str:
-    """
-    Clé de déduplication stable :
-    - priorité à l'URL si elle existe (sans ponctuation finale élargie)
-    - sinon messages 'système' mappés sur une clé fixe
-    - sinon message normalisé (sans '— RUN HH:MM:SS • ... —')
-    """
     s = str(raw_msg)
+    txt = _normalize_msg(s)
 
     # messages système courants -> clé fixe
-    txt = _normalize_msg(s)
     if txt == "⏳ En cours…":
         return "sys::pending"
     if txt == "✅ Terminé":
@@ -97,7 +91,6 @@ def _dedup_key(raw_msg: str) -> str:
     if txt.startswith("— RUN"):
         return "sys::run_start"
     if txt.startswith("🎯 Filtre école"):
-        # inclure l'école pour autoriser un changement d'école
         m = re.search(r"Filtre école:\s*([^\|]+)", txt)
         school = _normalize_msg(m.group(1)) if m else ""
         return f"sys::filter::{school.lower()}"
@@ -112,7 +105,7 @@ def _dedup_key(raw_msg: str) -> str:
         url = m.group(1).rstrip(TRAIL_PUNCT)
         return f"url::{url.lower()}"
 
-    # enlève un éventuel préfixe de type '— RUN HH:MM:SS • ... —'
+    # enlève préfixe RUN pour stabiliser
     s2 = re.sub(
         r"^—\s*RUN\s*\d{2}:\d{2}:\d{2}\s*•\s*[^—]+—\s*",
         "",
@@ -126,7 +119,6 @@ def _should_skip_by_key(key: str) -> bool:
     if not key:
         return True
     if st.session_state.run_id is None:
-        # pas de run actif -> on n'affiche rien
         return True
     return key in st.session_state.seen_keys
 
@@ -135,15 +127,11 @@ def _remember_key(key: str):
 
 # ------------------------------ LOG APPEND (ATOMIQUE) ------------------------------
 def append_log(msg: str):
-    """
-    Append atomique + dédup via clé stable.
-    On évite aussi deux messages strictement identiques d'affilée.
-    """
     raw = str(msg)
     norm = _normalize_msg(raw)
     key = _dedup_key(raw)
 
-    # filet de sécurité: même message que le précédent -> skip
+    # filet de sécurité consécutif
     if st.session_state.last_norm_msg == norm:
         return
 
@@ -156,60 +144,82 @@ def append_log(msg: str):
         st.session_state.last_norm_msg = norm
         st.session_state.last_key = key
 
-    # rafraîchit l'UI
     render_logs()
     time.sleep(0.003)
 
 # ------------------------------ RUNNER ------------------------------
 def _start_run(task: str, school: str):
-    # anti double-clic / rerun rapproché
-    now = time.time()
-    if now - st.session_state.last_start_epoch < 0.25:
+    """
+    Lance un run si et seulement si aucun run n'est déjà actif.
+    Protégé par un verrou global non bloquant (anti-multi-run).
+    """
+    run_lock = _get_run_lock()
+
+    # essai non bloquant: si quelqu'un d'autre tourne, on sort
+    if not run_lock.acquire(blocking=False):
+        # un run est déjà en cours quelque part -> on n'en lance pas un 2e
         return
-    st.session_state.last_start_epoch = now
-    if st.session_state.busy:
-        return
-
-    st.session_state.busy = True
-    st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
-    # reset dédup & panneau vierge par run
-    st.session_state.seen_keys = set()
-    st.session_state.logs = []
-    st.session_state.last_norm_msg = None
-    st.session_state.last_key = None
-
-    append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
-    append_log("⏳ En cours…")
-
-    def logger(m):
-        # tous les scripts passent ici
-        append_log(str(m))
 
     try:
-        if task == "web":
-            script_web.run(logger=logger, school_filter=school)
-        elif task == "gmb":
-            gmb.run(logger=logger, school_filter=school)
-        elif task == "summary":
-            update_summary.run(logger=logger, school_filter=school)
-        append_log("✅ Terminé")
-    except Exception as e:
-        append_log(f"❌ ERREUR : {e}")
-    finally:
-        st.session_state.busy = False
-        st.session_state.run_id = None
+        # anti double-clic très rapproché
+        now = time.time()
+        if now - st.session_state.last_start_epoch < 0.25:
+            return
+        st.session_state.last_start_epoch = now
+        if st.session_state.busy:
+            return
 
-# ------------------------------ BOUTONS ------------------------------
+        st.session_state.busy = True
+        st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
+        # reset dédup & panneau vierge par run
+        st.session_state.seen_keys = set()
+        st.session_state.logs = []
+        st.session_state.last_norm_msg = None
+        st.session_state.last_key = None
+
+        append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
+        append_log("⏳ En cours…")
+
+        def logger(m):
+            append_log(str(m))
+
+        try:
+            if task == "web":
+                script_web.run(logger=logger, school_filter=school)
+            elif task == "gmb":
+                gmb.run(logger=logger, school_filter=school)
+            elif task == "summary":
+                update_summary.run(logger=logger, school_filter=school)
+            append_log("✅ Terminé")
+        except Exception as e:
+            append_log(f"❌ ERREUR : {e}")
+        finally:
+            st.session_state.busy = False
+            st.session_state.run_id = None
+    finally:
+        # libère le verrou de run quoi qu'il arrive
+        try:
+            run_lock.release()
+        except RuntimeError:
+            pass
+
+# ------------------------------ BOUTONS (on_click) ------------------------------
+def _on_click_web():
+    _start_run("web", st.session_state.selected_school)
+
+def _on_click_gmb():
+    _start_run("gmb", st.session_state.selected_school)
+
+def _on_click_summary():
+    _start_run("summary", st.session_state.selected_school)
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    if st.button("Scraper plateformes web", disabled=st.session_state.busy):
-        _start_run("web", st.session_state.selected_school)
+    st.button("Scraper plateformes web", disabled=st.session_state.busy, on_click=_on_click_web)
 with col2:
-    if st.button("Avis Google Business", disabled=st.session_state.busy):
-        _start_run("gmb", st.session_state.selected_school)
+    st.button("Avis Google Business", disabled=st.session_state.busy, on_click=_on_click_gmb)
 with col3:
-    if st.button("Mettre à jour le Sommaire", disabled=st.session_state.busy):
-        _start_run("summary", st.session_state.selected_school)
+    st.button("Mettre à jour le Sommaire", disabled=st.session_state.busy, on_click=_on_click_summary)
 with col4:
     if st.button("🧹 Effacer les logs", disabled=st.session_state.busy):
         st.session_state.logs.clear()
