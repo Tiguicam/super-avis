@@ -216,6 +216,20 @@ def append_log(msg: str):
     # filet de sécurité
     if st.session_state.last_norm_msg == norm:
         return
+    # ✅ Detect progress events: "PROGRESS i/n"
+    if norm.startswith("PROGRESS "):
+        try:
+            _, ratio = norm.split(" ", 1)
+            done, total = ratio.split("/")
+            done = int(done)
+            total = int(total)
+            pct = int(done * 100 / total)
+            if "progress_bar" in st.session_state and st.session_state.progress_bar:
+                st.session_state.progress_bar.progress(pct)
+        except:
+            pass
+        return
+
 
     _capture_parts(norm)
 
@@ -227,12 +241,6 @@ def append_log(msg: str):
         st.session_state.logs.append({"ts": _now_hms(), "msg": norm})
         st.session_state.last_norm_msg = norm
         st.session_state.last_key = key
-
-    # ✅ PROGRESS BAR UPDATE
-    if "progress_bar" in st.session_state and st.session_state.progress_bar:
-        current = len(st.session_state.logs)
-        pct = min(100, int(current / 5))   # 5 logs = +20%
-        st.session_state.progress_bar.progress(pct)
 
     render_logs()
     time.sleep(0.003)
