@@ -108,22 +108,57 @@ def load_gmb_yaml(path: str):
 # AUTH (GMB OAuth)
 # ----------------------------------------------------------------
 def get_user_credentials() -> Credentials:
-    creds = None
+    """
+    Priorité:
+    1) Streamlit: st.secrets["gmb_token"] (token.json injecté)
+    2) Local: token.json (si présent)
+    3) Local: flow OAuth avec client_secret.json (ouvre un navigateur)
+    """
+    # 1) Streamlit secrets
+    try:
+        import streamlit as st  # import local pour éviter la dépendance hors cloud
+        if "gmb_token" in st.secrets:
+            info = dict(st.secrets["gmb_token"])
+            # scopes peut être str ou list : normalisons
+            scopes_val = info.get("scopes")
+            if isinstance(scopes_val, str):
+                info["scopes"] = [s.strip() for s in scopes_val.split(",") if s.strip()]
+            elif isinstance(scopes_val, list):
+                pass
+            else:
+                info["scopes"] = ["https://www.googleapis.com/auth/business.manage"]
+
+            creds = Credentials.from_authorized_user_info(info, SCOPE_GMB)
+            if not creds.valid and creds.refresh_token:
+                creds.refresh(Request())
+            return creds
+    except Exception:
+        # On ignore et on tente les options locales
+        pass
+
+    # 2) Local: token.json présent -> on le lit
     if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPE_GMB)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(CLIENT_SECRET_FILE):
-                raise FileNotFoundError("client_secret.json introuvable")
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CLIENT_SECRET_FILE, SCOPE_GMB
-            )
-            creds = flow.run_local_server(port=0, prompt='consent')
-        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPE_GMB)
+            if not creds.valid and creds.refresh_token:
+                creds.refresh(Request())
+            return creds
+        except Exception:
+            pass
+
+    # 3) Local: flow OAuth (nécessite client_secret.json et un navigateur)
+    if not os.path.exists(CLIENT_SECRET_FILE):
+        raise FileNotFoundError(
+            "client_secret.json introuvable et aucun gmb_token dans st.secrets. "
+            "Fais l’auth en local une fois pour générer token.json, "
+            "puis copie son contenu dans st.secrets[gmb_token]."
+        )
+    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPE_GMB)
+    creds = flow.run_local_server(port=0, prompt='consent')
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        f.write(creds.to_json())
     return creds
+
 
 def build_session(creds: Credentials) -> AuthorizedSession:
     s = AuthorizedSession(creds)
