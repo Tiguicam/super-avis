@@ -27,7 +27,8 @@ def _normalize_msg(s: str) -> str:
 
 # Regex & constantes
 URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
-TRAIL_PUNCT = ")]>;,.!?’’\""
+# ponctuation finale élargie (flèches, tirets, guillemets FR, points de suspension, etc.)
+TRAIL_PUNCT = ")]>;,.!?’’\"—–-→…:»«·"
 
 # Ressources partagées (verrou global pour append_log)
 @st.cache_resource
@@ -49,6 +50,12 @@ if "seen_keys" not in st.session_state:
     st.session_state.seen_keys = set()  # clés de déduplication vues durant ce run
 if "last_start_epoch" not in st.session_state:
     st.session_state.last_start_epoch = 0.0
+
+# mémorise le dernier message normalisé et la dernière clé (filet de sécu)
+if "last_norm_msg" not in st.session_state:
+    st.session_state.last_norm_msg = None
+if "last_key" not in st.session_state:
+    st.session_state.last_key = None
 
 # ------------------------------ ECOLES ------------------------------
 ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
@@ -75,17 +82,29 @@ render_logs()
 def _dedup_key(raw_msg: str) -> str:
     """
     Clé de déduplication stable :
-    - priorité à l'URL si elle existe (sans ponctuation finale)
-    - sinon message normalisé sans l'horodatage '— RUN HH:MM:SS • ... —'
-    - certains messages système sont regroupés sur une clé fixe
+    - priorité à l'URL si elle existe (sans ponctuation finale élargie)
+    - sinon messages 'système' mappés sur une clé fixe
+    - sinon message normalisé (sans '— RUN HH:MM:SS • ... —')
     """
-    s = str(raw_msg).strip()
+    s = str(raw_msg)
 
-    # messages système communs -> clé fixe
-    if s == "⏳ En cours…":
+    # messages système courants -> clé fixe
+    txt = _normalize_msg(s)
+    if txt == "⏳ En cours…":
         return "sys::pending"
-    if s == "✅ Terminé":
+    if txt == "✅ Terminé":
         return "sys::done"
+    if txt.startswith("— RUN"):
+        return "sys::run_start"
+    if txt.startswith("🎯 Filtre école"):
+        # inclure l'école pour autoriser un changement d'école
+        m = re.search(r"Filtre école:\s*([^\|]+)", txt)
+        school = _normalize_msg(m.group(1)) if m else ""
+        return f"sys::filter::{school.lower()}"
+    if txt.startswith("📚 Collecte pour"):
+        m = re.search(r"Collecte pour\s+(.+?)…?$", txt)
+        school = _normalize_msg(m.group(1)) if m else ""
+        return f"sys::collect::{school.lower()}"
 
     # URL prioritaire
     m = URL_RE.search(s)
@@ -93,10 +112,15 @@ def _dedup_key(raw_msg: str) -> str:
         url = m.group(1).rstrip(TRAIL_PUNCT)
         return f"url::{url.lower()}"
 
-    # enlève un éventuel préfixe de type '— RUN 13:35:55 • WEB • TOUTES —'
-    s = re.sub(r"^—\s*RUN\s*\d{2}:\d{2}:\d{2}\s*•\s*[^—]+—\s*", "", s, flags=re.IGNORECASE)
-    s = _normalize_msg(s).lower()
-    return f"msg::{s}"
+    # enlève un éventuel préfixe de type '— RUN HH:MM:SS • ... —'
+    s2 = re.sub(
+        r"^—\s*RUN\s*\d{2}:\d{2}:\d{2}\s*•\s*[^—]+—\s*",
+        "",
+        s,
+        flags=re.IGNORECASE
+    )
+    s2 = _normalize_msg(s2).lower()
+    return f"msg::{s2}"
 
 def _should_skip_by_key(key: str) -> bool:
     if not key:
@@ -112,17 +136,25 @@ def _remember_key(key: str):
 # ------------------------------ LOG APPEND (ATOMIQUE) ------------------------------
 def append_log(msg: str):
     """
-    Append atomique + dédup via clé stable. On marque la clé 'vue' AVANT d'afficher
-    pour éviter les courses entre threads/reruns.
+    Append atomique + dédup via clé stable.
+    On évite aussi deux messages strictement identiques d'affilée.
     """
     raw = str(msg)
+    norm = _normalize_msg(raw)
     key = _dedup_key(raw)
+
+    # filet de sécurité: même message que le précédent -> skip
+    if st.session_state.last_norm_msg == norm:
+        return
+
     lock = _get_log_lock()
     with lock:
         if _should_skip_by_key(key):
             return
         _remember_key(key)
-        st.session_state.logs.append({"ts": _now_hms(), "msg": _normalize_msg(raw)})
+        st.session_state.logs.append({"ts": _now_hms(), "msg": norm})
+        st.session_state.last_norm_msg = norm
+        st.session_state.last_key = key
 
     # rafraîchit l'UI
     render_logs()
@@ -140,9 +172,11 @@ def _start_run(task: str, school: str):
 
     st.session_state.busy = True
     st.session_state.run_id = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
-    # reset dédup & (optionnel) panneau vierge par run
+    # reset dédup & panneau vierge par run
     st.session_state.seen_keys = set()
     st.session_state.logs = []
+    st.session_state.last_norm_msg = None
+    st.session_state.last_key = None
 
     append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
     append_log("⏳ En cours…")
