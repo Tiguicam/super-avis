@@ -28,6 +28,13 @@ URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
 # ponctuation finale élargie (flèches, tirets, guillemets FR, ellipses, etc.)
 TRAIL_PUNCT = ")]>;,.!?’’\"—–-→…:»«·"
 
+# LIGNE D'AUTORITÉ (Option A) attendue depuis script_web :
+# 📊 CREAD → brut 24 | uniques 17 | sheet +0 | ♻️ MAJ 7
+RE_SUMMARY_AUTH = re.compile(
+    r"^📊\s*(?P<school>.+?)\s*→\s*brut\s*(?P<brut>\d+)\s*\|\s*uniques\s*(?P<uniques>\d+)\s*\|\s*sheet\s*\+?(?P<sheet>\d+)(?:\s*\|\s*♻️\s*MAJ\s*(?P<maj>\d+))?\s*$",
+    re.IGNORECASE
+)
+
 # Ressources partagées (verrous)
 @st.cache_resource
 def _get_log_lock():
@@ -57,6 +64,12 @@ if "last_norm_msg" not in st.session_state:
     st.session_state.last_norm_msg = None
 if "last_key" not in st.session_state:
     st.session_state.last_key = None
+
+# Stats d'autorité (remplies uniquement si 📊 est émise par script_web)
+if "authoritative_summary" not in st.session_state:
+    st.session_state.authoritative_summary = None  # dict: {"school","brut","uniques","sheet","+maj"}
+if "recap_emitted" not in st.session_state:
+    st.session_state.recap_emitted = False
 
 # ------------------------------ ECOLES ------------------------------
 ECOLES = ["TOUTES", "BRASSART", "CREAD", "EFAP", "EFJ", "ESEC", "ICART", "Ecole bleue"]
@@ -133,11 +146,56 @@ def _should_skip_by_key(key: str) -> bool:
 def _remember_key(key: str):
     st.session_state.seen_keys.add(key)
 
+# ------------------------------ PARSEUR DU RÉCAP D'AUTORITÉ ------------------------------
+def _ingest_authoritative_summary(msg_norm: str):
+    """
+    Capture la ligne d'autorité émise par script_web :
+    📊 SCHOOL → brut N | uniques M | sheet +K | ♻️ MAJ U
+    """
+    m = RE_SUMMARY_AUTH.search(msg_norm)
+    if not m:
+        return False
+
+    school = _normalize_msg(m.group("school"))
+    brut = int(m.group("brut"))
+    uniques = int(m.group("uniques"))
+    sheet_added = int(m.group("sheet"))
+    maj = int(m.group("maj")) if m.group("maj") is not None else 0
+
+    st.session_state.authoritative_summary = {
+        "school": school,
+        "brut": brut,
+        "uniques": uniques,
+        "sheet_added": sheet_added,
+        "maj": maj,
+    }
+    return True
+
+def _maybe_emit_recap_from_authority():
+    """
+    Si on a reçu la ligne 📊 d'autorité et que le récap n'a pas encore été émis,
+    on ajoute une ligne claire "🧾 Récap ..."
+    """
+    if st.session_state.recap_emitted:
+        return
+    auth = st.session_state.authoritative_summary
+    if not auth:
+        return
+
+    school = auth["school"]
+    brut = auth["brut"]
+    uniques = auth["uniques"]
+    sheet_added = auth["sheet_added"]
+    # NB: on n'affiche pas MAJ dans le récap final, selon l'option demandée
+    append_log(f"🧾 Récap {school} → brut {brut} | uniques {uniques} | ajoutés sheet +{sheet_added}")
+    st.session_state.recap_emitted = True
+
 # ------------------------------ LOG APPEND (ATOMIQUE) ------------------------------
 def append_log(msg: str):
     """
     Append atomique + dédup via clé stable.
     On évite aussi deux messages strictement identiques d'affilée.
+    On ingère la ligne 📊 d'autorité si elle passe.
     """
     raw = str(msg)
     norm = _normalize_msg(raw)
@@ -147,6 +205,9 @@ def append_log(msg: str):
     if st.session_state.last_norm_msg == norm:
         return
 
+    # Ingestion éventuelle du récap d'autorité
+    _ingest_authoritative_summary(norm)
+
     lock = _get_log_lock()
     with lock:
         if _should_skip_by_key(key):
@@ -155,6 +216,9 @@ def append_log(msg: str):
         st.session_state.logs.append({"ts": _now_hms(), "msg": norm})
         st.session_state.last_norm_msg = norm
         st.session_state.last_key = key
+
+    # essaie d'émettre le récap (si on vient de recevoir la 📊)
+    _maybe_emit_recap_from_authority()
 
     # rafraîchit l'UI
     render_logs()
@@ -190,6 +254,8 @@ def _start_run(task: str, school: str):
         st.session_state.logs = []
         st.session_state.last_norm_msg = None
         st.session_state.last_key = None
+        st.session_state.authoritative_summary = None
+        st.session_state.recap_emitted = False
 
         append_log(f"— RUN {_now_hms()} • {task.upper()} • {school} —")
         append_log("⏳ En cours…")
@@ -204,6 +270,10 @@ def _start_run(task: str, school: str):
                 gmb.run(logger=logger, school_filter=school)
             elif task == "summary":
                 update_summary.run(logger=logger, school_filter=school)
+
+            # si la ligne 📊 n'a pas été reçue, on n'émet rien (Option A = autorité script_web)
+            _maybe_emit_recap_from_authority()
+
             append_log("✅ Terminé")
         except Exception as e:
             append_log(f"❌ ERREUR : {e}")
