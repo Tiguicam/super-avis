@@ -322,6 +322,22 @@ def _iter_locations_from_entry(entry: dict):
             out.append((str(res), entry.get("ville", "")))
     return out
 
+def _get_existing_uids(ws):
+    existing = set()
+    try:
+        # rapide: lire UNIQUEMENT la colonne A si ton header est bien en A1 = uid
+        uids_col = ws.col_values(1)
+        for u in uids_col[1:]:
+            u = (u or "").strip()
+            if u:
+                existing.add(u)
+    except:
+        pass
+    return existing
+
+def _row_to_values(row_dict):
+    return [row_dict.get(k, "") for k in EXPECTED_HEADERS]
+
 # ----------------------------------------------------------------
 def main(school_filter=None, logger=print):
     gmb_entries = load_gmb_yaml(GMB_YAML_FILE)
@@ -332,11 +348,12 @@ def main(school_filter=None, logger=print):
     creds = get_user_credentials()
     session = build_session(creds)
 
-    for entry in gmb_entries:
-        name = entry.get("name", "").strip()
+    filt = (school_filter or "").strip().lower()
+    use_filter = bool(filt and filt != "toutes")
 
-        # ✅ Filtre école
-        if school_filter and name.lower() != school_filter.lower():
+    for entry in gmb_entries:
+        name = (entry.get("name", "") or "").strip()
+        if use_filter and name.lower() != filt:
             continue
 
         sheet_id = entry.get("sheet_id", "")
@@ -349,8 +366,11 @@ def main(school_filter=None, logger=print):
         logger(f"\n📚 {name}")
         ws = get_sheet(sheet_id, tab_name="TEST")
 
-        rows_with_uid = []
-        total = 0
+        ensure_headers(ws)
+        existing = _get_existing_uids(ws)
+
+        total_found, total_new = 0, 0
+        pending_rows = []  # tous les nouveaux à insérer à la fin
 
         for resource, ville in locs:
             try:
@@ -361,24 +381,37 @@ def main(school_filter=None, logger=print):
 
             ville_used = ville or autodetect_city(session, account_id, location_id)
 
-            count = 0
+            # lister les avis pour CETTE location
+            count_found = 0
+            new_here = 0
             for rev in list_reviews_for_location(session, account_id, location_id):
-                row, uid = map_gmb_review_to_row(
+                row_list, uid = map_gmb_review_to_row(
                     rev, name, account_id, location_id, ville_val=ville_used
                 )
-                rows_with_uid.append((row, uid))
-                count += 1
-                total += 1
+                count_found += 1
+                if uid not in existing:
+                    pending_rows.append(row_list)
+                    existing.add(uid)
+                    new_here += 1
+
+            total_found += count_found
+            total_new += new_here
 
             if not ville_used:
                 logger(f"  ⚠️ Ville introuvable pour {resource}. Active Business Information API ou renseigne `ville:` dans gmb.yaml.")
 
-            logger(f"  ✅ {resource} ({ville_used}) → {count} avis")
+            # **une seule ligne** pour cette location
+            logger(f"🏷️ {resource} ({ville_used or '—'}) → {count_found} avis  |  +{new_here} nouveaux")
 
-        added = append_rows_no_duplicates(ws, rows_with_uid)
-        logger(f"📝 {added} nouveaux (sur {total})")
+        # push des nouveaux (toutes locations de l'école)
+        if pending_rows:
+            ws.append_rows(pending_rows, value_input_option="RAW")
+
+        # résumé par école
+        logger(f"📊 {name} → total {total_found} avis  |  +{total_new} nouveaux")
 
     logger("\n✅ FIN\n")
+
 
 # ----------------------------------------------------------------
 def run(logger=print, school_filter=None):

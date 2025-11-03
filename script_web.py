@@ -477,36 +477,11 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
             logger(f"⚠️ Bloc ignoré ({ecole}) — sheet_id ou urls manquants.")
             continue
 
-        logger(f"\n📚 Collecte pour {ecole}...")
+        logger(f"\n📚 Collecte pour {ecole}…")
 
-        all_reviews = []
-        for url in urls:
-            logger(f"🌍 Scraping {url}")
-            try:
-                if "diplomeo.com" in url:
-                    all_reviews.extend(scrape_diplomeo(url))
-                elif "capitainestudy" in url:
-                    all_reviews.extend(scrape_capstudy(url))
-                elif "custplace" in url:
-                    all_reviews.extend(scrape_cust(url))
-            except Exception as e:
-                logger(f"  ⚠️ Erreur sur {url}: {e}")
-            time.sleep(0.5)
-
-        # uniques (par UID stable qui inclut l'URL)
-        uniq, seen = [], set()
-        for r in all_reviews:
-            if r["uid"] in seen:
-                continue
-            seen.add(r["uid"])
-            uniq.append(r)
-
-        logger(f"🔎 {len(all_reviews)} avis bruts | 📌 {len(uniq)} uniques")
-
-        # --- ÉCRITURE GOOGLE SHEET (mise à jour si date/annee changent) ---
+        # --- Préparer le sheet & les index existants
         sheet = get_sheet(sheet_id)
         ensure_headers(sheet)
-
         header = sheet.row_values(1)
         col_index = {name: header.index(name) + 1 for name in EXPECTED_HEADERS}  # 1-based
 
@@ -530,56 +505,92 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
         except Exception:
             pass
 
-        new_rows = []
-        updates = []        # payloads pour batch_update
-        updated_count = 0
+        # Ces deux listes seront envoyées au sheet APRES toutes les URLs
+        pending_updates = []   # batch_update payloads {range, values}
+        pending_new_rows = []  # lignes complètes à append
 
-        for r in uniq:
-            # 1) si l'UID exact existe déjà, on skip (même source exacte)
-            if r["uid"] in existing_uid:
+        # Totaux par école
+        total_found, total_new, total_updated = 0, 0, 0
+
+        for url in urls:
+            # 1) scrape l'URL
+            reviews = []
+            try:
+                if "diplomeo.com" in url:
+                    reviews = scrape_diplomeo(url)
+                elif "capitainestudy" in url:
+                    reviews = scrape_capstudy(url)
+                elif "custplace" in url:
+                    reviews = scrape_cust(url)
+                else:
+                    reviews = []
+            except Exception as e:
+                logger(f"🌍 {url} → ⚠️ erreur: {e}")
                 continue
 
-            # 2) sinon on cherche par clé souple (même avis via site+prenom+texte)
-            sk = soft_key_from_values(r.get("site", ""), r.get("prenom", ""), r.get("texte", ""))
-            if sk in existing_soft:
-                info = existing_soft[sk]
-                new_date  = r.get("date", "") or ""
-                new_annee = r.get("annee", "") or ""
-                if new_date != info["date"] or new_annee != info["annee"]:
-                    rownum = info["row"]
-                    # MAJ colonne date
-                    updates.append({
-                        "range": rowcol_to_a1(rownum, col_index["date"]),  # ex: D2
-                        "values": [[new_date]],
-                    })
-                    # MAJ colonne annee
-                    updates.append({
-                        "range": rowcol_to_a1(rownum, col_index["annee"]),  # ex: E2
-                        "values": [[new_annee]],
-                    })
-                    updated_count += 1
-                # ne pas ajouter en double
-                continue
+            # 2) dédoublonne localement (au cas où la page ait des duplicats)
+            uniq_url, seen_local = [], set()
+            for r in reviews:
+                if r["uid"] in seen_local:
+                    continue
+                seen_local.add(r["uid"])
+                uniq_url.append(r)
 
-            # 3) sinon c'est un vrai nouveau
-            new_rows.append([r.get(k, "") for k in EXPECTED_HEADERS])
-            existing_uid.add(r["uid"])
-            existing_soft[sk] = {"row": None, "date": r.get("date", "") or "", "annee": r.get("annee", "") or ""}
+            found = len(uniq_url)
+            new_here, updated_here = 0, 0
 
-        # Appliquer les MAJ d’abord (dates/années)
-        if updates:
-            sheet.batch_update(updates)
+            # 3) décide : nouveau / mise à jour / ignoré
+            for r in uniq_url:
+                # si l'UID exact existe déjà, on ignore (même source exacte)
+                if r["uid"] in existing_uid:
+                    continue
 
-        # Puis append les nouveaux avis
-        if new_rows:
-            sheet.append_rows(new_rows, value_input_option="RAW")
+                sk = soft_key_from_values(r.get("site", ""), r.get("prenom", ""), r.get("texte", ""))
 
-        # Logs
-        if updates:
-            logger(f"♻️ {updated_count} avis mis à jour (date/année).")
-        if new_rows:
-            logger(f"✅ {len(new_rows)} nouveaux avis ajoutés")
-        if not updates and not new_rows:
-            logger("ℹ️ Aucun changement")
+                # existe déjà via soft-key → possible MAJ date/année
+                if sk in existing_soft:
+                    info = existing_soft[sk]
+                    new_date  = r.get("date", "") or ""
+                    new_annee = r.get("annee", "") or ""
+                    if new_date != info["date"] or new_annee != info["annee"]:
+                        rownum = info["row"]
+                        if rownum:
+                            pending_updates.append({
+                                "range": rowcol_to_a1(rownum, col_index["date"]),
+                                "values": [[new_date]],
+                            })
+                            pending_updates.append({
+                                "range": rowcol_to_a1(rownum, col_index["annee"]),
+                                "values": [[new_annee]],
+                            })
+                            updated_here += 1
+                            # garder en mémoire la dernière valeur pour éviter de re-MAJ
+                            existing_soft[sk]["date"] = new_date
+                            existing_soft[sk]["annee"] = new_annee
+                    # sinon pas de changement
+                    continue
+
+                # sinon : c'est un vrai nouveau
+                pending_new_rows.append([r.get(k, "") for k in EXPECTED_HEADERS])
+                existing_uid.add(r["uid"])
+                existing_soft[sk] = {"row": None, "date": r.get("date", "") or "", "annee": r.get("annee", "") or ""}
+                new_here += 1
+
+            total_found += found
+            total_new += new_here
+            total_updated += updated_here
+
+            # 4) LOG **une seule ligne** pour l'URL
+            logger(f"🌍 {url} → {found} avis  |  +{new_here} nouveaux, ♻️ {updated_here} MAJ")
+
+        # 5) Appliquer d’abord les MAJ, puis les ajouts
+        if pending_updates:
+            sheet.batch_update(pending_updates, value_input_option="RAW")
+        if pending_new_rows:
+            sheet.append_rows(pending_new_rows, value_input_option="RAW")
+
+        # 6) Résumé par école
+        logger(f"📊 {ecole} → total {total_found} avis  |  +{total_new} nouveaux, ♻️ {total_updated} MAJ")
 
     logger("\n✅ Web scraping terminé !")
+
