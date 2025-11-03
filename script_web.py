@@ -515,7 +515,9 @@ def run(logger=print, school_filter=None, ecoles_choisies=None):
         # ➜ Uniques DU RUN (dédoublonnés via soft-key site+prenom+texte)
         run_soft_seen = set()
 
-        for url in urls:
+        for i, url in enumerate(urls, start=1):
+            # ✅ Progress avant traitement de l'URL
+            logger(f"PROGRESS {i}/{len(urls)}")
             # 1) scrape l'URL
             reviews = []
             try:
